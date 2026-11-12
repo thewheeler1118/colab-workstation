@@ -64,13 +64,15 @@ def save_managed_sessions(sessions: list, path: Path = STATE_PATH) -> None:
     _atomic_write_json(Path(path), {"sessions": sessions, "updated_at_utc": _utc_now()})
 
 
-def record_session(session_id: str, gpu: str, run_id: str, deadline_utc: str, path: Path = STATE_PATH) -> dict:
+def record_session(session_id: str, gpu: str, run_id: str, deadline_utc: str, path: Path = STATE_PATH,
+                   production_task_id: str = "") -> dict:
     sessions = load_managed_sessions(path)
     sessions = [s for s in sessions if s.get("session_id") != session_id]
     rec = {
         "session_id": session_id,
         "gpu": gpu,
         "run_id": run_id,
+        "production_task_id": production_task_id,
         "started_at_utc": _utc_now(),
         "deadline_utc": deadline_utc,
         "status": "active",
@@ -226,6 +228,7 @@ def main() -> int:
     p.add_argument("--gpu", required=True)
     p.add_argument("--run-id", required=True)
     p.add_argument("--deadline-utc", required=True)
+    p.add_argument("--production-task-id", default="")
     p = sub.add_parser("watch")
     p.add_argument("--session", required=True)
     p.add_argument("--poll-sec", type=int, default=60)
@@ -237,7 +240,8 @@ def main() -> int:
     p.add_argument("--colab-auth", default="adc")
     a = parser.parse_args()
     if a.cmd == "record":
-        print(json.dumps(record_session(a.session, a.gpu, a.run_id, a.deadline_utc), indent=2))
+        print(json.dumps(record_session(a.session, a.gpu, a.run_id, a.deadline_utc,
+                                        production_task_id=a.production_task_id), indent=2))
         return 0
     if a.cmd == "watch":
         global LEDGER_PATH

@@ -35,8 +35,8 @@
     },
     {
       "path": "AGENTS.md",
-      "size_bytes": 3816,
-      "sha256": "5b0e5ec8e1de9632edadb92acfd013478100c9c73181ce3eaf642320ff5a0967",
+      "size_bytes": 3989,
+      "sha256": "63ddf91e9d3a2066a35f54558fd510593588093829507ba0f4b7cdde20b0613d",
       "role": "Supporting file"
     },
     {
@@ -509,8 +509,8 @@
     },
     {
       "path": "h3_budget.py",
-      "size_bytes": 20288,
-      "sha256": "207e6eb04e8712fadbb7362d429204c086da6f5152427bcfe915772012b3c324",
+      "size_bytes": 21236,
+      "sha256": "7646d3a7404c79b3a12bb2d7c4523f8be9ec360387f4d965509a0557020de184",
       "role": "Per-task CU ledger (30 CU) + GPU choice policy (G4/G4/A100_HIGH_MEM)"
     },
     {
@@ -527,8 +527,8 @@
     },
     {
       "path": "h3_controller.py",
-      "size_bytes": 59082,
-      "sha256": "f50a772438033aa275c2063f4e640d9794269e1eb8e0d643d30760d5209e26be",
+      "size_bytes": 60895,
+      "sha256": "e57631bff87fcbf6dc53f4d9da60e93593cc3dd5e092bfd0469e04bf13b77ce7",
       "role": "Run orchestration: preflight, allocation, mount, worker exec, download, stop"
     },
     {
@@ -587,8 +587,8 @@
     },
     {
       "path": "h3_session_watchdog.py",
-      "size_bytes": 10285,
-      "sha256": "8186770c8b361fac3b43622e65e933071959c5f328545c346a444b90aa999df5",
+      "size_bytes": 10520,
+      "sha256": "81d42b3e45992e24d63e634e695ab6395b0ed4385b3ae7f7a6b2d75769ef85ad",
       "role": "Managed-session registry, deadline watchdog, stop + reconcile"
     },
     {
@@ -725,8 +725,8 @@
     },
     {
       "path": "scripts/run_h3_ab.sh",
-      "size_bytes": 1670,
-      "sha256": "60fabd3b85ca5e08f8f76eb82419c9f1ba5d04ec55ba306711a4b7052c109ebb",
+      "size_bytes": 2500,
+      "sha256": "f3573db85b685c59fc59c4f684c1c10fcf717b68bb4ffaf1f4d5d267dee21da3",
       "role": "Operator wrapper / offline check"
     },
     {
@@ -839,14 +839,14 @@
     },
     {
       "path": "tests/test_h3_mount_repair.py",
-      "size_bytes": 24032,
-      "sha256": "7ae12b90c3dc033148522049d7f6c95f4260913cb251950076360cd74616f733",
+      "size_bytes": 24057,
+      "sha256": "8050d2977411b0bfe8b5646f96e71991e30c3d0e78ae6f3198b61f5931b31ab8",
       "role": "Tests: mount repair, CLI patches, budget/watchdog/restore gates (31 tests)"
     },
     {
       "path": "tests/test_h3_production.py",
-      "size_bytes": 41874,
-      "sha256": "b7767e080d8a6a983f319bf73210ea5eb7742d38a4cb8a0864a327d2934ba0f7",
+      "size_bytes": 42074,
+      "sha256": "6f21e909f06979c97c37a91f5d2a8f6a8003c5e72d7b2186728b90220fe90bd1",
       "role": "Tests: production flow incl. worker marker, stop, parsers (63 tests)"
     },
     {
@@ -854,6 +854,12 @@
       "size_bytes": 12679,
       "sha256": "0b680e5c3985676fc5215cabf16784a5bdf6e7dce1125463ac58e21fefa23b30",
       "role": "NEW regression tests: find_rendered_video history shapes (8 tests)"
+    },
+    {
+      "path": "tests/test_task_budget.py",
+      "size_bytes": 9259,
+      "sha256": "3b93a129f249659e9a2176b4481390ec3e168278f24503edddb38a79df9c540c",
+      "role": "Tests"
     },
     {
       "path": "workflow_api.json",
