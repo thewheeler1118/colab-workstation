@@ -2,6 +2,17 @@
 
 STATUS: PROPOSED_ONLY.
 
+TASK-002 NOTE (2026-11-12, offline-verified only): a missing ledger
+now refuses without explicit authorisation
+(`NEW_TASK_REQUIRES_AUTHORIZATION`, `--authorize-new-task`);
+`--production-task-id` is required at the controller and in
+`scripts/run_h3_ab.sh`; the historical default `h3-ab-20261111` is
+never reused silently; A/B and retries share one task's 30 CU
+(`h3_budget.py`, `h3_controller.py`, branch `fix/task-budget-isolation`,
+commit `ccf405b`; tests `tests/test_task_budget.py`, 9 tests). No live
+GPU run has exercised this path yet — a real run id is still required
+before CONFIRMED_FIXED.
+
 ## Context
 
 h3_budget.py — initialize/ledger functions; h3_controller.py — initialize_project_budget. Historical context: user correction 2026-11-11 09:12 (60 CU cumulative reading voided; per-task 30 CU).

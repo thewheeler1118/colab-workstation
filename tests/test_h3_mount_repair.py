@@ -315,7 +315,7 @@ class VmRestartAndCleanupTest(unittest.TestCase):
     def test_ledger_survives_restart_baseline_unchanged(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "ledger.json"
-            ledger = load_or_create_budget_ledger(path, 165.27, "run-1")
+            ledger = load_or_create_budget_ledger(path, 165.27, "run-1", authorize_new_task=True)
             self.assertEqual(ledger["initial_balance_cu"], 165.27)
             self.assertEqual(ledger["hard_stop_balance_cu"], 135.27)
             reconcile_budget(ledger, 163.21, path)

@@ -33,7 +33,7 @@ How to work in this repo. Read this before changing anything.
 # Offline (safe anywhere)
 python -m py_compile *.py
 python tests/run_ci_tests.py            # full suite minus 2 poster-gated tests
-python -m unittest discover -s tests -q # 185 tests; 2 poster errors expected in clean checkout
+python -m unittest discover -s tests -q # 224 tests; 2 poster errors expected in clean checkout
 python scripts/check_workflow_schema.py
 python scripts/verify_patch.py
 python scripts/verify_manifest.py      # after any file change, regenerate the manifest first (below)
@@ -47,7 +47,9 @@ python scripts/check_docs_index.py
 ./scripts/verify_shutdown.sh
 
 # Live GPU run (spends CU; operator + TTY + explicit confirmation only)
-./scripts/run_h3_ab.sh --confirm-live --variant A --run-id h3-<UTC>-<suffix>
+# --production-task-id is required: a new task id never gets a fresh
+# 30 CU silently; add --authorize-new-task only with user approval.
+./scripts/run_h3_ab.sh --confirm-live --production-task-id h3-ab-20261112 --variant A --run-id h3-<UTC>-<suffix>
 ```
 
 ## Making changes

@@ -51,8 +51,10 @@ CLEANUP_RESERVE_CU = 0.75
 MAX_SESSION_SECONDS = 14400
 
 # The A/B production task explicitly authorized by the user on 2026-11-11
-# 08:25 UTC. A later task gets a new id (and a new ledger) only when the
-# user explicitly starts another production task.
+# 08:25 UTC. This is a HISTORICAL task id, not a default for new runs:
+# the production entry points must receive --production-task-id explicitly,
+# and a later task gets a new id (and a new ledger) only when the user
+# explicitly starts another production task (TASK-002 §5.2).
 DEFAULT_PRODUCTION_TASK_ID = "h3-ab-20261111"
 
 
@@ -285,13 +287,25 @@ def _validate_ledger(data: dict) -> dict:
 
 
 def load_or_create_budget_ledger(path: Path, live_balance_cu: float, run_id: str,
-                                 prior_unbilled_reserve_cu: float = 0.0) -> dict:
+                                 prior_unbilled_reserve_cu: float = 0.0,
+                                 authorize_new_task: bool = False) -> dict:
     """Establish the baseline exactly once per production task. An existing
     ledger is never reset, even for a new run_id or a new variant.
     `prior_unbilled_reserve_cu` is the previous task's unbilled estimate,
     fixed at creation time; it is stored on the ledger and enforced via
-    the effective hard stop (see effective_hard_stop_cu)."""
+    the effective hard stop (see effective_hard_stop_cu).
+
+    A missing ledger is created ONLY when authorize_new_task is true:
+    a new task id on its own never grants a fresh 30 CU budget (TASK-002
+    §5.2). The authorization is recorded on the created ledger.
+    """
     path = Path(path)
+    if not path.exists() and not authorize_new_task:
+        task_id = path.stem.replace("h3_production_budget_", "", 1)
+        raise RuntimeError(
+            f"NEW_TASK_REQUIRES_AUTHORIZATION: no ledger for task {task_id!r}; "
+            "a new 30 CU task needs explicit user authorization (--authorize-new-task). "
+            "Refusing to grant a fresh budget silently.")
     if path.exists():
         data = _validate_ledger(json.loads(path.read_text(encoding="utf-8")))
         # Balance must not have increased (top-up / meter reset needs
@@ -312,6 +326,9 @@ def load_or_create_budget_ledger(path: Path, live_balance_cu: float, run_id: str
         "production_task_id": Path(path).stem.replace("h3_production_budget_", "", 1),
         "project_budget_cu": PROJECT_BUDGET_CU,
         "per_session_budget_cu": PER_SESSION_BUDGET_CU,
+        "authorized": True,
+        "authorization": "user-explicit --authorize-new-task",
+        "authorized_at_utc": _utc_now(),
         "initial_balance_cu": float(live_balance_cu),
         "hard_stop_balance_cu": hard_stop,
         "prior_task_unbilled_reserve_cu": float(prior_unbilled_reserve_cu),

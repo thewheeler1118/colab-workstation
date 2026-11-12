@@ -90,7 +90,7 @@ class ProductionTest(unittest.TestCase):
     def test_budget_baseline_not_reset(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "ledger.json"
-            first = load_or_create_budget_ledger(p, 165.27, "h3-run-1")
+            first = load_or_create_budget_ledger(p, 165.27, "h3-run-1", authorize_new_task=True)
             self.assertEqual(first["initial_balance_cu"], 165.27)
             self.assertEqual(first["hard_stop_balance_cu"], 135.27)
             second = load_or_create_budget_ledger(p, 160.00, "h3-run-2")
@@ -102,7 +102,7 @@ class ProductionTest(unittest.TestCase):
     def test_budget_persists_across_restart(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "ledger.json"
-            load_or_create_budget_ledger(p, 165.27, "h3-run-1")
+            load_or_create_budget_ledger(p, 165.27, "h3-run-1", authorize_new_task=True)
             loaded = json.loads(p.read_text())
             self.assertEqual(loaded["initial_balance_cu"], 165.27)
             self.assertEqual(oct(p.stat().st_mode & 0o777), "0o600")
@@ -114,7 +114,7 @@ class ProductionTest(unittest.TestCase):
         self.assertEqual(CLEANUP_RESERVE_CU, 0.75)
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "ledger.json"
-            ledger = load_or_create_budget_ledger(p, 165.27, "r1")
+            ledger = load_or_create_budget_ledger(p, 165.27, "r1", authorize_new_task=True)
             # 25 CU session, 24.5 CU already spent in-session -> usable < reserve
             with self.assertRaises(RuntimeError):
                 allowed_runtime_seconds(10.0, 165.27, ledger, session_spent_cu=24.5)
@@ -128,7 +128,7 @@ class ProductionTest(unittest.TestCase):
         # the old fixed 3600 s cap: the session must not be cut off by it.
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "ledger.json"
-            ledger = load_or_create_budget_ledger(p, 165.27, "r1")
+            ledger = load_or_create_budget_ledger(p, 165.27, "r1", authorize_new_task=True)
             self.assertGreater(allowed_runtime_seconds(8.88, 163.21, ledger), 3600)
 
     def test_worker_done_marker_required(self):
@@ -183,7 +183,7 @@ class ProductionTest(unittest.TestCase):
     def test_unknown_gpu_rate_rejected(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "ledger.json"
-            ledger = load_or_create_budget_ledger(p, 165.27, "r1")
+            ledger = load_or_create_budget_ledger(p, 165.27, "r1", authorize_new_task=True)
             with self.assertRaises(RuntimeError):
                 allowed_runtime_seconds(0, 165.27, ledger)
             with self.assertRaises(RuntimeError):
@@ -367,6 +367,11 @@ class ProductionTest(unittest.TestCase):
         # not {"videos": [...]}. The worker only read 'videos'/'gifs' and
         # discarded a fully rendered 18-minute inference. A real video
         # under animated 'images' must be found; a still image must not.
+        # This test exercises history-shape handling only, so the decode
+        # gate is injected as a stub probe (the real ffprobe gate is
+        # covered by tests/test_savevideo_history.py with real videos).
+        valid_probe = lambda p: {"frames": 226, "fps": 24.0, "width": 736,
+                                 "height": 1312, "codec": "h264"}
         with tempfile.TemporaryDirectory() as d:
             comfy = Path(d)
             out_dir = comfy / "output"
@@ -374,19 +379,19 @@ class ProductionTest(unittest.TestCase):
             video = out_dir / "muse_h3_A_00001_.mp4"
             video.write_bytes(b"x" * 20000)
             outputs = {"92": {"images": [{"filename": "muse_h3_A_00001_.mp4", "subfolder": "", "type": "output"}], "animated": (True,)}}
-            self.assertEqual(find_rendered_video(comfy, outputs), video)
+            self.assertEqual(find_rendered_video(comfy, outputs, probe=valid_probe), video)
             # Still image under 'images' without animated must not match.
             png = out_dir / "still.png"
             png.write_bytes(b"y" * 20000)
             outputs2 = {"92": {"images": [{"filename": "still.png", "subfolder": "", "type": "output"}]}}
             with self.assertRaisesRegex(RuntimeError, "did not contain verifiable saved video"):
-                find_rendered_video(comfy, outputs2)
+                find_rendered_video(comfy, outputs2, probe=valid_probe)
             # Legacy 'videos' format still works.
             outputs3 = {"92": {"videos": [{"filename": "muse_h3_A_00001_.mp4", "subfolder": "", "type": "output"}]}}
-            self.assertEqual(find_rendered_video(comfy, outputs3), video)
+            self.assertEqual(find_rendered_video(comfy, outputs3, probe=valid_probe), video)
             # Failure message must name the history output keys for diagnosis.
             with self.assertRaisesRegex(RuntimeError, "History output keys"):
-                find_rendered_video(comfy, {"92": {"images": []}})
+                find_rendered_video(comfy, {"92": {"images": []}}, probe=valid_probe)
 
     def test_ui_workflow_json_rejected(self):
         with self.assertRaisesRegex(ValueError, "API format"):
@@ -482,7 +487,7 @@ class ProductionTest(unittest.TestCase):
         # must fail closed, never be silently accepted.
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "ledger.json"
-            led = load_or_create_budget_ledger(p, 165.27, "run-1")
+            led = load_or_create_budget_ledger(p, 165.27, "run-1", authorize_new_task=True)
             led["project_budget_cu"] = 60.0
             led["hard_stop_balance_cu"] = 105.27
             p.write_text(json.dumps(led))
@@ -495,7 +500,7 @@ class ProductionTest(unittest.TestCase):
         # previous task cannot push the account below the floor.
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "ledger.json"
-            led = load_or_create_budget_ledger(p, 162.77, "run-1", prior_unbilled_reserve_cu=0.14)
+            led = load_or_create_budget_ledger(p, 162.77, "run-1", prior_unbilled_reserve_cu=0.14, authorize_new_task=True)
             self.assertEqual(led["hard_stop_balance_cu"], 132.77)
             self.assertEqual(led["prior_task_unbilled_reserve_cu"], 0.14)
             self.assertEqual(led["effective_hard_stop_balance_cu"], 132.91)
@@ -574,7 +579,7 @@ class ProductionTest(unittest.TestCase):
     def test_ab_share_one_project_budget(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "ledger.json"
-            a = load_or_create_budget_ledger(p, 165.27, "h3-run-A")
+            a = load_or_create_budget_ledger(p, 165.27, "h3-run-A", authorize_new_task=True)
             reconcile_budget(a, 160.27, p)
             self.assertEqual(a["max_observed_spent_cu"], 5.0)
             b = load_or_create_budget_ledger(p, 160.27, "h3-run-B")

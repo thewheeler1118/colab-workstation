@@ -79,7 +79,7 @@ def validate_model_cache_manifest(d: dict) -> None:
         if not f.get('server_verified'): raise ValueError('Server evidence missing for '+f['path'])
         if not f.get('hf_revision'): raise ValueError('HF revision must be pinned')
 
-def patch_api_workflow(api: dict, variant: str, poster_name: str='poster.jpg', seed: int=42) -> dict:
+def patch_api_workflow(api: dict, variant: str, poster_name: str='poster.jpg', seed: int=42, run_id: str='') -> dict:
     """Patch known OFFICIAL GUI node IDs after ComfyUI's Save(API Format) export.
     We deliberately refuse if IDs/types differ; node drift must be explicitly mapped.
     """
@@ -121,7 +121,10 @@ def patch_api_workflow(api: dict, variant: str, poster_name: str='poster.jpg', s
         del out['145']
     if '141' in out and out['141'].get('class_type')=='ComfySwitchNode':
         out['141']['inputs']['on_true']=['127',0]
-    out['92']['inputs']['filename_prefix']='muse_h3_'+variant
+    # SaveVideo filename carries variant + RUN_ID, so history/rescue can
+    # prove a file belongs to this run (TASK-002 §4.2). Without a run_id
+    # the legacy prefix is kept (existing tests / offline callers).
+    out['92']['inputs']['filename_prefix'] = f'muse_h3_{variant}_{run_id}' if run_id else 'muse_h3_'+variant
     out['127']['inputs']['unet_name']='minimax_h3_ref2va_pruned_int8_convrot.safetensors'
     out['128']['inputs']['clip_name']='qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors'
     # API export can connect these via Primitive* nodes; replace links, not node IDs.

@@ -364,12 +364,14 @@ def ensure_no_foreign_sessions(pre):
         raise RuntimeError("Existing Colab sessions present; fail closed. Check remote sessions manually.")
 
 
-def initialize_project_budget(run_id: str, prior_unbilled_reserve_cu: float = PRIOR_TASK_UNBILLED_RESERVE_CU) -> dict:
+def initialize_project_budget(run_id: str, prior_unbilled_reserve_cu: float = PRIOR_TASK_UNBILLED_RESERVE_CU,
+                              authorize_new_task: bool = False) -> dict:
     live = read_live_usage(_COLAB_AUTH)
     if live.get("balance") is None:
         raise RuntimeError("Cannot parse CU balance; abort")
     return load_or_create_budget_ledger(LEDGER_PATH, live["balance"], run_id,
-                                        prior_unbilled_reserve_cu=prior_unbilled_reserve_cu)
+                                        prior_unbilled_reserve_cu=prior_unbilled_reserve_cu,
+                                        authorize_new_task=authorize_new_task)
 
 
 def probe_actual_gpu(session: str, choice_key: str) -> dict:
@@ -674,6 +676,74 @@ def archive_variant_to_drive(variant: str, run_id: str, qa_files: list | None = 
     return {"output_folder_id": run_folder, "files": uploaded}
 
 
+def deliver_variant_to_drive(variant: str, run_id: str, video_info: dict,
+                             archive_fn=None, max_attempts: int = 3) -> dict:
+    """Archive a locally validated MP4 to Drive AFTER the GPU is stopped.
+
+    Call this only after download_and_validate_variant() has already run
+    validate_final_video() on the local file. This helper re-proves the
+    file on disk is that validated file (it must exist and its SHA-256
+    must match video_info), then uploads with bounded retries and returns
+    the delivery evidence. The server-side parent/trash check inside
+    archive_variant_to_drive() is what makes drive_upload_verified true —
+    a bare upload return is never enough.
+
+    Delivery states (TASK-002 §4.5): INFERENCE_COMPLETED /
+    REMOTE_MP4_VALIDATED / LOCAL_MP4_DOWNLOADED / LOCAL_MP4_VALIDATED are
+    recorded by run_variant before this call; this helper covers
+    DRIVE_UPLOAD_STARTED / DRIVE_UPLOAD_VERIFIED / DELIVERY_COMPLETED.
+
+    On failure after max_attempts it raises RuntimeError stating the
+    local MP4 path: the GPU is already stopped, so the correct recovery
+    is an archive-only retry — never a re-run of the inference.
+    """
+    from h3_contract import sha256_file
+
+    archive_fn = archive_fn or archive_variant_to_drive
+    local_path = OUTPUT_ROOT / run_id / f"{variant}.mp4"
+    if not local_path.is_file():
+        raise RuntimeError(f"Delivery refused: local MP4 missing: {local_path}")
+    for key in ("frame_count", "width", "height", "fps", "sha256"):
+        if key not in video_info:
+            raise RuntimeError(f"Delivery refused: video_info lacks {key}")
+    if (video_info["frame_count"], video_info["width"], video_info["height"]) != (274, 1080, 1920):
+        raise RuntimeError("Delivery refused: local video failed final dimensions/frames")
+    if sha256_file(local_path) != video_info["sha256"]:
+        raise RuntimeError(f"Delivery refused: local MP4 SHA-256 does not match validated video_info: {local_path}")
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
+        record({"event": "drive_upload_started", "variant": variant, "run_id": run_id, "attempt": attempt})
+        try:
+            result = archive_fn(variant, run_id)
+            entry = (result.get("files") or {}).get(f"{variant}.mp4")
+            if not entry or not entry.get("drive_file_id"):
+                raise RuntimeError("Archive returned no Drive file id for the MP4")
+            evidence = {
+                "variant": variant, "run_id": run_id,
+                "local_video_validated": True,
+                "drive_file_id": entry["drive_file_id"],
+                "drive_upload_verified": True,
+                "frames": video_info["frame_count"], "width": video_info["width"],
+                "height": video_info["height"], "fps": video_info["fps"],
+                "sha256": video_info["sha256"],
+                "drive_output_folder_id": result.get("output_folder_id"),
+                "state": "DELIVERY_COMPLETED",
+            }
+            record({"event": "drive_upload_verified", "variant": variant, "run_id": run_id,
+                    "drive_file_id": entry["drive_file_id"]})
+            return evidence
+        except Exception as e:  # noqa: BLE001 - retry, then report the last error
+            last_error = e
+            record({"event": "drive_upload_failed", "variant": variant, "run_id": run_id,
+                    "attempt": attempt, "error": str(e)[:300]})
+            if attempt < max_attempts:
+                time.sleep(5)
+    raise RuntimeError(
+        f"Drive delivery failed after {max_attempts} attempts; local MP4 preserved at {local_path} "
+        f"(sha256 {video_info['sha256'][:16]}...). Re-run archive only, do NOT re-run inference. "
+        f"Last error: {last_error}")
+
+
 def stop_and_verify_session(session: str) -> dict:
     stop_ok = False
     for attempt in range(3):
@@ -710,11 +780,53 @@ def reconcile_run_state(run_id: str) -> dict:
     return {"run_id": run_id, "ledger": ledger, "watchdog": reconcile_on_startup(_COLAB_AUTH)}
 
 
+def _wait_watchdog_ready(proc, ready_path: Path, session: str, production_task_id: str,
+                         timeout_sec: float = 15.0) -> dict:
+    """Fail-closed watchdog startup gate (TASK-002 §6.1). Wait until the
+    watchdog process proves it is ready — alive, holding this session's
+    record, bound to the same production task — by writing `ready_path`.
+    Any other outcome (early exit, readiness mismatch, timeout) raises
+    WATCHDOG_NOT_RUNNING so the caller aborts before inference and the
+    outer finally releases the just-created GPU session."""
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            raise RuntimeError(
+                f"WATCHDOG_NOT_RUNNING: watchdog exited with code {proc.returncode} "
+                f"before signalling readiness for session {session}")
+        if ready_path.exists():
+            try:
+                ready = json.loads(ready_path.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001 - partial write; keep waiting
+                pass
+            else:
+                if ready.get("session_id") == session and ready.get("production_task_id") == production_task_id:
+                    return ready
+                raise RuntimeError(
+                    "WATCHDOG_NOT_RUNNING: watchdog readiness mismatch for session "
+                    f"{session}: got {ready}")
+        time.sleep(0.25)
+    raise RuntimeError(
+        f"WATCHDOG_NOT_RUNNING: watchdog did not signal readiness for session {session} "
+        f"within {timeout_sec:g}s")
+
+
 def run_variant(args) -> dict:
-    global _EXEC_LOG_DIR
+    global _EXEC_LOG_DIR, LEDGER_PATH, PRODUCTION_TASK_ID
     variant = args.variant
     if variant not in ("A", "B"):
         raise ValueError("variant must be A or B")
+    # TASK-002 §5.2: the production task must be named explicitly. The
+    # historical default h3-ab-20261111 is never reused silently: a new
+    # RUN_ID without --production-task-id used to bind to the old task's
+    # ledger. An explicit old id still continues that task (e.g. the B
+    # re-run), but it must be typed out.
+    if not getattr(args, "production_task_id", ""):
+        raise RuntimeError("--production-task-id is required for run; the historical default is never reused silently")
+    # Bind the module ledger to this run's task (main() does the same for
+    # CLI runs; this keeps programmatic calls consistent too).
+    PRODUCTION_TASK_ID = args.production_task_id
+    LEDGER_PATH = ledger_path_for_task(ROOT, PRODUCTION_TASK_ID)
     if not all((args.execute, args.confirm_gpu, args.authorize_task_gpu, args.allow_g4, args.allow_a100_highmem)):
         raise RuntimeError("GPU blocked: require --execute --confirm-gpu --authorize-task-gpu --allow-g4 --allow-a100-highmem")
     if float(args.project_budget_cu) != PROJECT_BUDGET_CU or float(args.per_session_budget_cu) != PER_SESSION_BUDGET_CU:
@@ -741,17 +853,33 @@ def run_variant(args) -> dict:
     verify_ready(drive, same_account, Path(args.cache_manifest))
     ledger = initialize_project_budget(args.run_id,
                                        prior_unbilled_reserve_cu=getattr(args, "prior_unbilled_reserve_cu",
-                                                                         PRIOR_TASK_UNBILLED_RESERVE_CU))
+                                                                         PRIOR_TASK_UNBILLED_RESERVE_CU),
+                                       authorize_new_task=getattr(args, "authorize_new_task", False))
     pre = inspect()
     if pre["cu_balance"] is None:
         raise RuntimeError("Cannot parse CU balance; abort")
     ensure_no_foreign_sessions(pre)
-    # Watchdog reconciliation: any managed session still active blocks a new allocation.
+    # Watchdog reconciliation: any managed session still active blocks a
+    # new allocation. An unconfirmable leftover is a hard stop, never a
+    # reason to run a second GPU in parallel — and never a reason to stop
+    # a session that is not one of ours.
     from h3_session_watchdog import reconcile_on_startup
 
     rec = reconcile_on_startup(_COLAB_AUTH)
     if rec.get("managed_active_sessions"):
-        raise RuntimeError(f"Managed GPU sessions still active: {rec['managed_active_sessions']}; stop them first")
+        detail = rec.get("managed_active_detail") or [
+            {"session_id": s} for s in rec["managed_active_sessions"]]
+        lines = []
+        for d in detail:
+            est = d.get("unbilled_estimate_cu")
+            lines.append(
+                f"{d.get('session_id')} (run {d.get('run_id')}, task {d.get('production_task_id')}, "
+                f"deadline {d.get('deadline_utc')}, unbilled estimate "
+                f"{est if est is not None else 'unconfirmable'} CU)")
+        raise RuntimeError(
+            "CRITICAL_ORPHAN_GPU_SESSION: managed GPU session(s) still active; refusing to allocate "
+            "another GPU in parallel. Stop them first (never stop non-project sessions): "
+            + "; ".join(lines))
     probe = run_cli(['drivemount','--help'], timeout=20, check=False)
     if probe["returncode"] != 0:
         raise RuntimeError("Official Colab drivemount unavailable")
@@ -770,6 +898,7 @@ def run_variant(args) -> dict:
     created = False
     allocation_attempted = False
     stop_ok = False
+    result = None
     gpu_info = None
     chosen_key = None
     attempts = []
@@ -827,17 +956,36 @@ def run_variant(args) -> dict:
         deadline = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=initial_sec)
         from h3_session_watchdog import record_session
 
-        session_rec = record_session(session, chosen_key, args.run_id, deadline.isoformat())
+        session_rec = record_session(session, chosen_key, args.run_id, deadline.isoformat(),
+                                     production_task_id=args.production_task_id)
+        # Fail-closed watchdog startup (TASK-002 §6.1): the watcher must
+        # prove it is alive, holding this session's record, and bound to
+        # this task before any inference. On any startup failure the
+        # exception propagates to the outer finally, which stops and
+        # verifies the just-created GPU session.
+        ready_path = run_dir / f"watchdog_{variant}_ready.json"
         watchdog_proc = None
         try:
             watchdog_proc = subprocess.Popen(
                 [sys.executable, str(ROOT / "h3_session_watchdog.py"), "watch", "--session", session,
-                 "--production-task-id", getattr(args, "production_task_id", PRODUCTION_TASK_ID)],
+                 "--production-task-id", getattr(args, "production_task_id", PRODUCTION_TASK_ID),
+                 "--ready-file", str(ready_path)],
                 stdout=open(run_dir / f"watchdog_{variant}.log", "a"),
                 stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
             )
+            _wait_watchdog_ready(watchdog_proc, ready_path, session, args.production_task_id)
+            record({"event": "watchdog_ready", "session": session, "ready_file": str(ready_path)})
         except Exception as e:  # noqa: BLE001
             record({"event": "watchdog_start_failed", "session": session, "error": str(e)[:300]})
+            if watchdog_proc is not None:
+                try:
+                    if watchdog_proc.poll() is None:
+                        watchdog_proc.terminate()
+                except Exception:  # noqa: BLE001 - already failing; do not mask it
+                    pass
+            if isinstance(e, RuntimeError) and str(e).startswith("WATCHDOG_NOT_RUNNING"):
+                raise
+            raise RuntimeError(f"WATCHDOG_NOT_RUNNING: watchdog failed to start: {e}") from e
         try:
             # GPU hardware probe before any expensive work.
             gpu_info = probe_actual_gpu(session, chosen_key)
@@ -902,7 +1050,7 @@ def run_variant(args) -> dict:
             elapsed = time.monotonic() - start
             if elapsed > budget_sec:
                 raise TimeoutError("Budget wall time reached before " + variant)
-            task = {"variant": variant, "drive_cache_dir": args.drive_cache_dir, "comfy_ref": args.comfy_ref,
+            task = {"variant": variant, "run_id": args.run_id, "drive_cache_dir": args.drive_cache_dir, "comfy_ref": args.comfy_ref,
                     "inference_timeout_sec": min(1800, max(100, int(budget_sec - elapsed - 120))),
                     "rate_cu_h": live["rate"],
                     "session_budget_cu": round(budget_sec * float(live["rate"]) / 3600.0, 3),
@@ -923,6 +1071,7 @@ def run_variant(args) -> dict:
                 download_remote_comfyui_log(session, run_dir)
                 raise
             record({"event": "worker_done", "variant": variant, "session": session, "done": done_info})
+            record({"event": "delivery_state", "variant": variant, "run_id": args.run_id, "state": "INFERENCE_COMPLETED"})
             # Independent remote verification of the real MP4 BEFORE any
             # download: the file must exist and ffprobe must read exactly
             # 274 frames at 24 fps, 1080x1920. Only then is the download
@@ -932,6 +1081,7 @@ def run_variant(args) -> dict:
                                        env={"H3_VARIANT": variant})
             checked = check_remote_output(output_check, variant)
             record({"event": "remote_output_checked", "variant": variant, "session": session, "checked": checked})
+            record({"event": "delivery_state", "variant": variant, "run_id": args.run_id, "state": "REMOTE_MP4_VALIDATED"})
             # Download the submitted workflow the worker validated, for audit.
             try:
                 run_cli(["download", "-s", session, REMOTE + "/workflow_submitted.json", str(run_dir / f"workflow_{variant}_submitted_remote.json")], timeout=120)
@@ -939,12 +1089,21 @@ def run_variant(args) -> dict:
                 pass
             info = download_and_validate_variant(session, variant, args.run_id)
             record({"event": "version_downloaded", "variant": variant, "session": session, "sha256": info["sha256"], "frames": info["frame_count"]})
+            record({"event": "delivery_state", "variant": variant, "run_id": args.run_id,
+                    "state": "LOCAL_MP4_DOWNLOADED"})
+            record({"event": "delivery_state", "variant": variant, "run_id": args.run_id,
+                    "state": "LOCAL_MP4_VALIDATED"})
             live = inspect()
             ledger = reconcile_budget(ledger, live["cu_balance"], LEDGER_PATH)
-            return {
+            # No return here: the GPU must be stopped (outer finally) BEFORE
+            # any Drive upload. The result is stored and delivered after the
+            # stop is verified; see the tail of this function.
+            result = {
                 "variant": variant, "run_id": args.run_id, "session": session, "gpu": gpu_info,
                 "attempts": attempts, "video": info, "ledger": {k: v for k, v in ledger.items() if not k.startswith("_")},
                 "live_balance_cu": live["cu_balance"], "live_rate_cu_h": live["rate"],
+                "delivery": {"state": "LOCAL_MP4_VALIDATED", "variant": variant, "run_id": args.run_id,
+                             "local_video_validated": True},
             }
         finally:
             if watchdog_proc is not None:
@@ -969,7 +1128,15 @@ def run_variant(args) -> dict:
         raise RuntimeError("GPU allocation did not complete; repeated session checks found no allocation, but delayed assignment remains possible. Recheck sessions later.")
     if not stop_ok:
         raise RuntimeError("Stop not verified; run FAILED regardless of generated files")
-    raise RuntimeError("run_variant reached unreachable state")
+    if result is None:
+        raise RuntimeError("run_variant reached unreachable state")
+    # The GPU is stopped and verified at this point, so the Drive upload
+    # burns no CU. Bounded retries inside deliver_variant_to_drive; on
+    # failure the local MP4 is preserved and the error directs an
+    # archive-only retry — never a re-run of the inference.
+    delivery = deliver_variant_to_drive(variant, result["run_id"], result["video"])
+    result["delivery"] = delivery
+    return result
 
 
 def test_or_run(args):
@@ -1005,7 +1172,13 @@ def main():
     parser.add_argument("--budget-cu", type=float, default=0.0)
     parser.add_argument("--project-budget-cu", type=float, default=PROJECT_BUDGET_CU)
     parser.add_argument("--per-session-budget-cu", type=float, default=PER_SESSION_BUDGET_CU)
-    parser.add_argument("--production-task-id", default=DEFAULT_PRODUCTION_TASK_ID)
+    parser.add_argument("--production-task-id", default="",
+                        help="Required for run. The historical task h3-ab-20261111 is never "
+                             "used implicitly; type it out to continue that task, or pass a "
+                             "new id together with --authorize-new-task.")
+    parser.add_argument("--authorize-new-task", action="store_true",
+                        help="Explicit user authorization to create a NEW 30 CU task ledger. "
+                             "Required when no ledger exists yet for --production-task-id.")
     parser.add_argument("--prior-unbilled-reserve-cu", type=float, default=PRIOR_TASK_UNBILLED_RESERVE_CU)
     parser.add_argument("--gpu-policy", default="G4_THEN_A100_HIGHMEM")
     parser.add_argument("--variant", choices=("A", "B"), default=None)
@@ -1018,8 +1191,11 @@ def main():
         parser.add_argument("--" + flag, action="store_true")
     a = parser.parse_args()
     _COLAB_AUTH = a.colab_auth
-    PRODUCTION_TASK_ID = a.production_task_id
-    LEDGER_PATH = ledger_path_for_task(ROOT, PRODUCTION_TASK_ID)
+    if a.action == "run" and not a.production_task_id:
+        parser.error("--production-task-id is required for run; the historical default is never reused silently")
+    if a.production_task_id:
+        PRODUCTION_TASK_ID = a.production_task_id
+        LEDGER_PATH = ledger_path_for_task(ROOT, PRODUCTION_TASK_ID)
     PRIOR_TASK_UNBILLED_RESERVE_CU = float(a.prior_unbilled_reserve_cu)
     if a.action == "run" and not a.variant:
         parser.error("--variant A|B is required for run")
