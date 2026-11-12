@@ -1994,7 +1994,7 @@ if not valid_mp4:
             if is_auth_failure(usage_res.stdout, usage_res.stderr):
                 err_msg = (
                     "Colab CLI OAuth2 尚未完成授权或令牌已过期。"
-                    "请在终端运行 `/Users/skycjq/.local/bin/colab --auth=oauth2 usage` 完成浏览器授权。"
+                    "请在终端运行 `colab --auth=oauth2 usage` 完成浏览器授权。"
                 )
                 report["errors"].append(err_msg)
                 return report
