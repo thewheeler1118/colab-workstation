@@ -902,7 +902,7 @@ def run_variant(args) -> dict:
             elapsed = time.monotonic() - start
             if elapsed > budget_sec:
                 raise TimeoutError("Budget wall time reached before " + variant)
-            task = {"variant": variant, "drive_cache_dir": args.drive_cache_dir, "comfy_ref": args.comfy_ref,
+            task = {"variant": variant, "run_id": args.run_id, "drive_cache_dir": args.drive_cache_dir, "comfy_ref": args.comfy_ref,
                     "inference_timeout_sec": min(1800, max(100, int(budget_sec - elapsed - 120))),
                     "rate_cu_h": live["rate"],
                     "session_budget_cu": round(budget_sec * float(live["rate"]) / 3600.0, 3),

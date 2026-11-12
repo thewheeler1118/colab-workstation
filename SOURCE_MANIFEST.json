@@ -521,14 +521,14 @@
     },
     {
       "path": "h3_contract.py",
-      "size_bytes": 8587,
-      "sha256": "7b8a371da0077ab760270b05336b9025522ff83bc7f8c336180790c860fb7dd6",
+      "size_bytes": 8865,
+      "sha256": "20ad3c380bfdeae0f32ba5ef1fa15b1227603d9f3eebfc84d8d69cae304de369",
       "role": "Video contract, A/B prompts, API workflow patch (pinned nodes)"
     },
     {
       "path": "h3_controller.py",
-      "size_bytes": 53886,
-      "sha256": "4e921e7f2dd28daee192811e1f1035c7f46fcaf3da433a3f28374a60153e6c16",
+      "size_bytes": 53909,
+      "sha256": "72d5352745b7bb3db25b830828a2df4abf7dd50b78360bdac624d0101496cc0b",
       "role": "Run orchestration: preflight, allocation, mount, worker exec, download, stop"
     },
     {
@@ -575,8 +575,8 @@
     },
     {
       "path": "h3_remote_worker.py",
-      "size_bytes": 32594,
-      "sha256": "72be93a49e62a692469a0f1f69e2df017f2ffe390638c4e9f48e1d720ad4f36a",
+      "size_bytes": 40886,
+      "sha256": "5739f060cca64ded6dd982b78e3af727129d9420833ff2a6f2d1a1b1e47f544f",
       "role": "Remote ComfyUI worker: restore, inference, find_rendered_video, assemble"
     },
     {
@@ -839,14 +839,14 @@
     },
     {
       "path": "tests/test_h3_production.py",
-      "size_bytes": 41443,
-      "sha256": "ebc917e105bfd614d9fdf7e386801eed99c7b655b977a2f5c4c42a97c4b6bd8b",
+      "size_bytes": 41874,
+      "sha256": "b7767e080d8a6a983f319bf73210ea5eb7742d38a4cb8a0864a327d2934ba0f7",
       "role": "Tests: production flow incl. worker marker, stop, parsers (63 tests)"
     },
     {
       "path": "tests/test_savevideo_history.py",
-      "size_bytes": 6298,
-      "sha256": "6a947a85280fc0f416c9128632cf7fee96dcd0428431ded5845b93e3fd78655f",
+      "size_bytes": 12679,
+      "sha256": "0b680e5c3985676fc5215cabf16784a5bdf6e7dce1125463ac58e21fefa23b30",
       "role": "NEW regression tests: find_rendered_video history shapes (8 tests)"
     },
     {
