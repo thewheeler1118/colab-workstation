@@ -572,15 +572,21 @@ def preflight(args) -> dict:
     return result
 
 
-def cli_drivemount_timeout_patch_present() -> bool:
+def cli_drivemount_timeout_patch_present(search_roots=None) -> bool:
     """Fail-closed check for the 2026-11-11 drivemount timeout patch in the
     vendored Colab CLI: automation.py must inject timeout_ms=600000 into the
     remote drive.mount() call, and the local automation ceiling must be 660s
     so the local execute deadline never cuts the remote 600s mount short.
-    If the venv is rebuilt, this check fails before any GPU is requested."""
+    If the venv is rebuilt, this check fails before any GPU is requested.
+
+    `search_roots` is a dependency-injection hook for tests: a list of
+    site-packages-like directories to scan instead of the interpreter's own
+    site-packages. Production preflight always calls it with no argument.
+    """
     import site
 
-    for base in site.getsitepackages():
+    roots = search_roots if search_roots is not None else site.getsitepackages()
+    for base in roots:
         candidate = Path(base) / "colab_cli" / "commands" / "automation.py"
         if candidate.exists():
             text = candidate.read_text(encoding="utf-8", errors="ignore")
@@ -588,15 +594,21 @@ def cli_drivemount_timeout_patch_present() -> bool:
     return False
 
 
-def cli_post_body_patch_present() -> bool:
+def cli_post_body_patch_present(search_roots=None) -> bool:
     """Fail-closed check for the 2026-11-11 VM transport workaround in the
     vendored Colab CLI: _issue_request must send a non-empty body on POSTs,
     otherwise the egress proxy strips Content-Length: 0 and Google returns
     411 for /tun/m/assign and /tun/m/unassign. If the venv is rebuilt, this
-    check fails before any GPU is requested."""
+    check fails before any GPU is requested.
+
+    `search_roots` is a dependency-injection hook for tests (see
+    cli_drivemount_timeout_patch_present). Production preflight always
+    calls it with no argument.
+    """
     import site
 
-    for base in site.getsitepackages():
+    roots = search_roots if search_roots is not None else site.getsitepackages()
+    for base in roots:
         candidate = Path(base) / "colab_cli" / "client.py"
         if candidate.exists():
             text = candidate.read_text(encoding="utf-8", errors="ignore")
