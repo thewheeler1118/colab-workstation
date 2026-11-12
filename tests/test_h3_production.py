@@ -367,6 +367,11 @@ class ProductionTest(unittest.TestCase):
         # not {"videos": [...]}. The worker only read 'videos'/'gifs' and
         # discarded a fully rendered 18-minute inference. A real video
         # under animated 'images' must be found; a still image must not.
+        # This test exercises history-shape handling only, so the decode
+        # gate is injected as a stub probe (the real ffprobe gate is
+        # covered by tests/test_savevideo_history.py with real videos).
+        valid_probe = lambda p: {"frames": 226, "fps": 24.0, "width": 736,
+                                 "height": 1312, "codec": "h264"}
         with tempfile.TemporaryDirectory() as d:
             comfy = Path(d)
             out_dir = comfy / "output"
@@ -374,19 +379,19 @@ class ProductionTest(unittest.TestCase):
             video = out_dir / "muse_h3_A_00001_.mp4"
             video.write_bytes(b"x" * 20000)
             outputs = {"92": {"images": [{"filename": "muse_h3_A_00001_.mp4", "subfolder": "", "type": "output"}], "animated": (True,)}}
-            self.assertEqual(find_rendered_video(comfy, outputs), video)
+            self.assertEqual(find_rendered_video(comfy, outputs, probe=valid_probe), video)
             # Still image under 'images' without animated must not match.
             png = out_dir / "still.png"
             png.write_bytes(b"y" * 20000)
             outputs2 = {"92": {"images": [{"filename": "still.png", "subfolder": "", "type": "output"}]}}
             with self.assertRaisesRegex(RuntimeError, "did not contain verifiable saved video"):
-                find_rendered_video(comfy, outputs2)
+                find_rendered_video(comfy, outputs2, probe=valid_probe)
             # Legacy 'videos' format still works.
             outputs3 = {"92": {"videos": [{"filename": "muse_h3_A_00001_.mp4", "subfolder": "", "type": "output"}]}}
-            self.assertEqual(find_rendered_video(comfy, outputs3), video)
+            self.assertEqual(find_rendered_video(comfy, outputs3, probe=valid_probe), video)
             # Failure message must name the history output keys for diagnosis.
             with self.assertRaisesRegex(RuntimeError, "History output keys"):
-                find_rendered_video(comfy, {"92": {"images": []}})
+                find_rendered_video(comfy, {"92": {"images": []}}, probe=valid_probe)
 
     def test_ui_workflow_json_rejected(self):
         with self.assertRaisesRegex(ValueError, "API format"):

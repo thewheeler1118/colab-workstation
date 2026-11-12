@@ -545,29 +545,190 @@ def execute_prompt(server,api:dict,timeout_sec:float):
         time.sleep(8)
     raise TimeoutError('H3 inference deadline exceeded')
 
-def find_rendered_video(comfy,outputs):
-    filenames=[]
+VIDEO_SUFFIXES = ('.mp4', '.webm', '.mov')
+
+# Raw animation the worker must locate: pinned production constants.
+# The ffprobe gate below requires the container to decode fully
+# (-count_frames), a video stream, exactly ANIMATION_FRAMES frames at FPS
+# and WIDTH x HEIGHT. Those are the contract values assemble.py already
+# enforces downstream; the gate fails fast here, with the observed value
+# in the error, instead of letting a wrong file reach assembly. If a
+# future live run shows ComfyUI writing a different container fps, the
+# gate fails closed naming it — correct the constant with that evidence,
+# never by weakening the gate to suffix+size.
+
+
+def probe_animation(path):
+    """ffprobe decode gate for a raw animation file (full decode via
+    assemble.ffprobe -count_frames). Returns probe evidence or raises
+    RuntimeError naming the mismatch. A non-video blob fails here: ffprobe
+    cannot parse it, so there is no video stream to measure."""
+    try:
+        data = ffprobe(Path(path))
+    except Exception as e:  # noqa: BLE001 - ffprobe errors are the verdict
+        raise RuntimeError(f"ffprobe failed on {Path(path).name}: {type(e).__name__}: {str(e)[:200]}")
+    streams = data.get("streams", [])
+    video = next((s for s in streams if s.get("codec_type") == "video"), None)
+    if video is None:
+        raise RuntimeError(f"No video stream in {Path(path).name}")
+    frames = int(video.get("nb_read_frames") or video.get("nb_frames") or 0)
+    rate = video.get("r_frame_rate", "0/1")
+    num, den = (rate.split("/") + ["1"])[:2]
+    fps = float(num) / float(den) if float(den) else 0.0
+    info = {"path": str(path), "frames": frames, "fps": round(fps, 3),
+            "width": int(video.get("width", 0)), "height": int(video.get("height", 0)),
+            "codec": video.get("codec_name")}
+    problems = []
+    if frames != ANIMATION_FRAMES:
+        problems.append(f"frames={frames}, expected {ANIMATION_FRAMES}")
+    if abs(fps - FPS) > 0.5:
+        problems.append(f"fps={fps}, expected {FPS}")
+    if info["width"] != WIDTH or info["height"] != HEIGHT:
+        problems.append(f"size={info['width']}x{info['height']}, expected {WIDTH}x{HEIGHT}")
+    if problems:
+        raise RuntimeError(f"Animation probe failed for {Path(path).name}: " + "; ".join(problems))
+    return info
+
+
+def _history_candidates(comfy, outputs, run_id="", variant=""):
+    """Filenames named by /history outputs, in history order, de-duplicated.
+    Entries without a filename can never name a file. When run_id/variant
+    are given, only files whose name contains both are this run's — a
+    previous run's file in the same output dir must never be picked up."""
+    candidates = []
     for output in outputs.values():
         # SaveVideo's UI output in the pinned ComfyUI (0.44.0) is
         # PreviewVideo, whose as_dict() is {"images": [...], "animated":
         # (True,)} — NOT {"videos": [...]}. The old 'videos'/'gifs' keys
-        # are kept for older formats. The file suffix + size check below
-        # is what actually proves the entry is a real video file, so a
-        # still-image entry under 'images' can never pass.
-        keys=['videos','gifs']
-        if output.get('animated'):keys.append('images')
+        # are kept for older formats; 'images' is read only when that
+        # output entry has a truthy 'animated' value.
+        keys = ['videos', 'gifs']
+        if output.get('animated'):
+            keys.append('images')
         for key in keys:
-            for x in output.get(key,[]):
-                if x.get('filename'):filenames.append((x['filename'],x.get('subfolder','')))
-    for name,sub in filenames:
-        p=comfy/'output'/sub/name
-        require_inside(p,comfy/'output')
-        if p.is_file() and p.suffix.lower() in ('.mp4','.webm','.mov') and p.stat().st_size>10000:return p
-    raise RuntimeError('ComfyUI history did not contain verifiable saved video; DO NOT assume successful render. History output keys: '+json.dumps({k:sorted(v.keys()) for k,v in outputs.items()},ensure_ascii=False)[:800])
+            for x in output.get(key, []) or []:
+                name = x.get('filename')
+                if not name:
+                    continue
+                if run_id and run_id not in name:
+                    continue
+                if variant and variant not in name:
+                    continue
+                p = comfy / 'output' / (x.get('subfolder') or '') / name
+                if p not in candidates:
+                    candidates.append(p)
+    return candidates
+
+
+def _validate_candidate(p, comfy, probe):
+    """Suffix + size + ffprobe gates for one history candidate.
+    Returns (probe_info, None) on pass or (None, reason) on failure."""
+    try:
+        require_inside(p, comfy / 'output')
+    except ValueError:
+        return None, 'path escapes ComfyUI/output'
+    if not p.is_file():
+        return None, 'not on disk'
+    if p.suffix.lower() not in VIDEO_SUFFIXES:
+        return None, f'unsupported suffix {p.suffix}'
+    if p.stat().st_size <= 10000:
+        return None, 'too small'
+    try:
+        return probe(p), None
+    except RuntimeError as e:
+        return None, str(e)[:300]
+
+
+def find_rendered_video(comfy, outputs, run_id="", variant="", probe=None):
+    """Locate this run's rendered animation from /history outputs.
+
+    Priority: history file records (videos/gifs, plus images when animated
+    is truthy). Every candidate must pass suffix, size and the ffprobe
+    decode gate (probe_animation by default; inject a fake probe in tests
+    to exercise selection logic without encoding video). Exactly one valid
+    candidate wins; several valid candidates is AMBIGUITY, never "take the
+    first" — a stale file from another run must not be silently used.
+    Raises RuntimeError when nothing valid is found; the caller then runs
+    rescue_rendered_video() before giving up.
+    """
+    probe = probe or probe_animation
+    candidates = _history_candidates(comfy, outputs, run_id, variant)
+    valid = []
+    rejected = []
+    for p in candidates:
+        info, reason = _validate_candidate(p, comfy, probe)
+        if info is None:
+            rejected.append(f"{p.name}: {reason}")
+        else:
+            valid.append(p)
+    if len(valid) == 1:
+        return valid[0]
+    if len(valid) > 1:
+        raise RuntimeError('Ambiguous rendered video: multiple valid candidates for run '
+                           + (run_id or '?') + ': ' + ', '.join(str(p) for p in valid))
+    raise RuntimeError('ComfyUI history did not contain verifiable saved video; DO NOT assume successful render. '
+                       'History output keys: ' + json.dumps({k: sorted(v.keys()) for k, v in outputs.items()}, ensure_ascii=False)[:800]
+                       + ('; rejected: ' + '; '.join(rejected) if rejected else ''))
+
+
+def rescue_rendered_video(comfy, run_id, variant, remaining_budget_seconds, probe=None):
+    """Bounded rescue when history cannot locate the video (TASK-002 §4.4).
+
+    Read-only scan of ComfyUI/output/ for files whose name contains this
+    run's RUN_ID (and variant). Each name match still passes suffix, size
+    and the ffprobe decode gate, and its SHA-256/path/size are recorded.
+    Returns evidence dict for the single valid file. Raises when there is
+    no valid file, when several valid files make ownership ambiguous, or
+    when remaining_budget_seconds runs out — never to keep the GPU alive
+    past the session budget for a rescue. The caller's outer exec timeout
+    remains the hard bound; this is the inner one.
+    """
+    probe = probe or probe_animation
+    if not run_id:
+        raise RuntimeError('Rescue needs a run_id; refusing to guess which output belongs to this run')
+    if remaining_budget_seconds is None or float(remaining_budget_seconds) <= 0:
+        raise RuntimeError('Rescue time budget exhausted before scan')
+    deadline = time.monotonic() + float(remaining_budget_seconds)
+    out_root = comfy / 'output'
+    if not out_root.is_dir():
+        raise RuntimeError('Rescue: ComfyUI/output missing')
+    matches = []
+    for p in sorted(out_root.rglob('*'), key=lambda q: q.stat().st_mtime if q.is_file() else 0, reverse=True):
+        if time.monotonic() > deadline:
+            raise RuntimeError('Rescue time budget exhausted during scan')
+        if not p.is_file() or p.suffix.lower() not in VIDEO_SUFFIXES:
+            continue
+        if run_id not in p.name or (variant and variant not in p.name):
+            continue
+        if p.stat().st_size <= 10000:
+            continue
+        matches.append(p)
+        if len(matches) > 20:
+            break
+    valid = []
+    for p in matches:
+        if time.monotonic() > deadline:
+            raise RuntimeError('Rescue time budget exhausted during probe')
+        try:
+            info = probe(p)
+        except RuntimeError:
+            continue
+        valid.append((p, info))
+    if len(valid) == 1:
+        p, info = valid[0]
+        return {"path": str(p), "size_bytes": p.stat().st_size, "sha256": sha256_file(p),
+                "frames": info["frames"], "fps": info["fps"],
+                "width": info["width"], "height": info["height"], "codec": info.get("codec")}
+    if len(valid) > 1:
+        raise RuntimeError('Rescue ambiguous: multiple valid videos for run ' + run_id + ': '
+                           + ', '.join(str(p) for p, _ in valid))
+    raise RuntimeError(f'Rescue found no verifiable video for run {run_id} variant {variant} '
+                       f'(scanned {len(matches)} name-matching files)')
 
 def main():
     task=json.loads((ROOT/'task.json').read_text())
     version=task['variant']
+    run_id=task.get('run_id','')
     if version not in ('A','B'):raise ValueError('bad variant')
     manifest=json.loads((ROOT/'model_manifest.json').read_text())
     cache=Path(task['drive_cache_dir']);comfy=Path('/content/ComfyUI')
@@ -595,14 +756,26 @@ def main():
         info=object_info
         print('COMFYUI_HEALTH_OK',flush=True)
         raw=json.loads((ROOT/'workflow_api.json').read_text())
-        api=patch_api_workflow(raw,version,'muse_original_poster.jpg',seed=42 if version=='A' else 43)
+        api=patch_api_workflow(raw,version,'muse_original_poster.jpg',seed=42 if version=='A' else 43,run_id=run_id)
         validate_api_against_object_info(api,info)
         (ROOT/'workflow_submitted.json').write_text(json.dumps(api,ensure_ascii=False,indent=2))
         print('COMFY_OBJECT_INFO_VALIDATED',flush=True)
         set_stage('inference_submit')
         outputs=execute_prompt(server,api,timeout_sec=task['inference_timeout_sec'])
         set_stage('find_rendered_video')
-        source=find_rendered_video(comfy,outputs)
+        try:
+            source = find_rendered_video(comfy, outputs, run_id, version)
+        except RuntimeError:
+            # History could not locate a verifiable video (wrong shape,
+            # stale name, or failed probe). Bounded rescue scans
+            # ComfyUI/output/ for this RUN_ID before the GPU is released;
+            # it never uses another run's file and never extends the
+            # session budget — the controller's exec timeout still bounds
+            # the whole worker run.
+            set_stage('rescue_rendered_video')
+            rescued = rescue_rendered_video(comfy, run_id, version, remaining_budget_seconds=300)
+            source = Path(rescued['path'])
+            print('VIDEO_RESCUED_JSON:' + json.dumps(rescued, ensure_ascii=False), flush=True)
         set_stage('assemble_mp4')
         final=ROOT/'output'/f'shao_nian_h3_{version}.mp4'
         info=assemble_video(source,ROOT/'poster.jpg',final)
