@@ -1,24 +1,35 @@
 # colab-workstation
 
 Versioned Colab AI production workstation with audited workflows, code,
-tests and runbooks. Private repo. The production baseline is the Muse
+tests and runbooks. The production baseline is the Muse
 Colab H3 controller/worker that renders MiniMax-H3 A/B video on Google
 Colab GPUs from a Drive-hosted model depot.
 
-## Status (2026-11-12, v0.1.0 — initial migration)
+> Visibility (2026-11-12, verified live): this repo is currently
+> **PUBLIC**. The change to private is blocked — the stored GitHub
+> token lacks the Administration scope (see
+> `TASK-002_SECURITY_CI_PRODUCTION_REMEDIATION.md`). Do not treat the
+> repo as private until the visibility is re-verified.
+
+## Status (2026-11-12, v0.1.0 — initial migration + TASK-002 local integration, not yet pushed)
 
 - **Variant A: SUCCEEDED** — run `h3-20261112T090027Z-8b07c6` (G4,
   274 frames, A.mp4 7,453,808 B, SHA-256
   `907a23dcf7fba719a3fd7d622c3477280698c2e1dd6a795c0f0ffd6593a63cbb`,
-  poster-tail PSNR 31.38 dB).
+  poster-tail PSNR 31.38 dB). Archived to Drive
+  `Muse-H3-Video-Outputs/h3-20261112T090027Z-8b07c6/` (folder
+  `1t4PXRCytvIvQAYzhZkXfxPI3sR63cYo8`, 6 files; A.mp4 Drive ID
+  `17tMh9D_a6a1tz0bPgPHZoaAI6YflyS_S`, local MD5 = server MD5
+  `77f132fdf32c4a1a3ca1246b54371303`) — verified 2026-11-12 in the H3
+  production session, not re-checked inside TASK-002.
 - **Variant B: PENDING RE-RUN** — run `h3-20261112T093207Z-7ab515` was
   interrupted by a VM restart ~09:48 UTC; the orphan A100 session was
   stopped and no MP4 was produced.
 - **Budget (task `h3-ab-20261111`)**: baseline 162.77 CU, max observed
   spent 18.58 CU (2026-11-12T09:49 UTC). Per-task independent 30 CU —
   never cumulative (see `docs/decisions/ADR-001.md`).
-- **Tests in this repo**: 185 total (173 migrated + 12 new).
-  **183 pass, 2 fail** in a clean checkout. The 2 failures are the
+- **Tests in this repo**: 224 total.
+  **222 pass, 2 fail** in a clean checkout. The 2 failures are the
   asset-gated poster tests below — expected, not a regression.
 - **No Colab GPU was created, no CU was spent, and no Drive content was
   touched by this migration.**

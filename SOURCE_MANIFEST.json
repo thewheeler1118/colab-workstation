@@ -36,7 +36,7 @@
     {
       "path": "AGENTS.md",
       "size_bytes": 3989,
-      "sha256": "63ddf91e9d3a2066a35f54558fd510593588093829507ba0f4b7cdde20b0613d",
+      "sha256": "601071c019f446689a23b88ee6057c5b715634bbbe4b6bb7e62f515ac828a797",
       "role": "Supporting file"
     },
     {
@@ -47,8 +47,8 @@
     },
     {
       "path": "README.md",
-      "size_bytes": 7162,
-      "sha256": "6bc0afbf4d95beeef4903d794d574c0c68a56781cdc2659264287f6b757fd7b2",
+      "size_bytes": 7804,
+      "sha256": "89d049361a6f1b4e2d5c26ab79d5b5d5337dcf9ce669d25429b296ae233a2d2b",
       "role": "Supporting file"
     },
     {
@@ -185,8 +185,8 @@
     },
     {
       "path": "docs/deployment_status.json",
-      "size_bytes": 1140,
-      "sha256": "fb76ddcdd2350df3637a3df02f7327db11e75d9b9a567f579e12f93f0a9e2ec1",
+      "size_bytes": 4183,
+      "sha256": "c0ac99a84455aa099c948a96401e8a316eddba6d893c743352d50a30b255b562",
       "role": "Documentation / evidence"
     },
     {
@@ -340,21 +340,33 @@
       "role": "Documentation / evidence"
     },
     {
+      "path": "docs/issues/p0-fix-github-ci.md",
+      "size_bytes": 1769,
+      "sha256": "38f713c11f9e7368c811560d59b7a61ceb99ab2dceac00664bb256e8279efc40",
+      "role": "Documentation / evidence"
+    },
+    {
       "path": "docs/issues/p0-persist-mp4-before-shutdown.md",
-      "size_bytes": 1181,
-      "sha256": "1c41e34869bc4de8e352c42d0951a14343b52e380a0d7ee75f6c9a2d76a6bfa8",
+      "size_bytes": 1806,
+      "sha256": "b1a2d6a6b71e7a6d645cf42fffb4a6218038ad01880040377f9602caccdbecb4",
+      "role": "Documentation / evidence"
+    },
+    {
+      "path": "docs/issues/p0-remove-personal-data.md",
+      "size_bytes": 1591,
+      "sha256": "2953cef4f5b19a6b53b0dc2a7984c266eae3c03d71a24995a711bcd054aba921",
       "role": "Documentation / evidence"
     },
     {
       "path": "docs/issues/p0-savevideo-history-schema.md",
-      "size_bytes": 1422,
-      "sha256": "9004bc8a13bcd3bbc1961da1a1c1415f6c8063bec95202daf3ccfd9d27bf9298",
+      "size_bytes": 1893,
+      "sha256": "1779c5f15a3b2697e99ef3e6aec90de6705cbf4d7bf65e99624c04012b7613c1",
       "role": "Documentation / evidence"
     },
     {
       "path": "docs/issues/p1-account-safe-30cu-ledger.md",
-      "size_bytes": 1016,
-      "sha256": "ae96a513671e17a937b4a9724fe1303dae07aecb796b2c395c5b460306dd7cbb",
+      "size_bytes": 1618,
+      "sha256": "cfbd8fef88a03dd52e551b98d60244e2ed3989e01bfc0cb435ef186b78385420",
       "role": "Documentation / evidence"
     },
     {
@@ -367,6 +379,12 @@
       "path": "docs/issues/p1-continuous-worker-progress.md",
       "size_bytes": 1007,
       "sha256": "c38b4475cf5355aefce7b56e60773df3dcbd2cf0131f18234c335543fc40f30e",
+      "role": "Documentation / evidence"
+    },
+    {
+      "path": "docs/issues/p1-fail-closed-watchdog.md",
+      "size_bytes": 1831,
+      "sha256": "325594e8fba4744d081ed9eb7147ec1a149acaddb90fe3fdb22f80e04fec1636",
       "role": "Documentation / evidence"
     },
     {
@@ -395,8 +413,8 @@
     },
     {
       "path": "docs/module_inventory.md",
-      "size_bytes": 27881,
-      "sha256": "1463865f4b26aff58bffe0c30d2f86e3f36b88418ebcba16745dc098dc341acb",
+      "size_bytes": 30503,
+      "sha256": "1b2fa41881d404aa0179d2502d2409d62bc5c5767903b34a2e1d09fb9ab15cbc",
       "role": "Module inventory (this table's source of truth for hashes)"
     },
     {
@@ -467,8 +485,8 @@
     },
     {
       "path": "docs/v3_progress.md",
-      "size_bytes": 11968,
-      "sha256": "0d4bd4e350cec801315310eee45b61b357063ff7b873630dfe0892bb7b5d837c",
+      "size_bytes": 11973,
+      "sha256": "097248cca709b1843a44fa944e13f2516d61d02be8c97509ea9d139580d9180a",
       "role": "Documentation / evidence"
     },
     {
@@ -515,8 +533,8 @@
     },
     {
       "path": "h3_comfyui_cache.py",
-      "size_bytes": 12408,
-      "sha256": "519ef9e9c8dde64645f0a8bd09d257796f3ec0f2464c3b396293087d9dc6d6bd",
+      "size_bytes": 12381,
+      "sha256": "aaea4e824b1c882879d05104b3e079eb2afc71a5275f8fb91810fa21f5334356",
       "role": "ComfyUI source archive build / verify / publish to Drive cache"
     },
     {
@@ -648,13 +666,13 @@
     {
       "path": "reference_v2/README.md",
       "size_bytes": 1956,
-      "sha256": "30191ed3d3a2d5e62a91d87305837e62be5bf5517cd16cd93501b34e5f53728f",
+      "sha256": "1f6168b2eef466739de09c458d55a3aed15e91b91a03a6d0094a56e67f106b2a",
       "role": "Supporting file"
     },
     {
       "path": "reference_v2/colab_manager.py",
-      "size_bytes": 145713,
-      "sha256": "cc3fd0b70ad343b322f57cc81ca4c33901ceacfe37449f0bdc649198fa2d5690",
+      "size_bytes": 145688,
+      "sha256": "c7f7a9103beff8c5d974bfb2b99f8273787490c7e7ed533555d318e075710300",
       "role": "Vendored CLI output parsing (usage/sessions) + log redaction"
     },
     {
