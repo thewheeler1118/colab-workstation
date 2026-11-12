@@ -364,12 +364,14 @@ def ensure_no_foreign_sessions(pre):
         raise RuntimeError("Existing Colab sessions present; fail closed. Check remote sessions manually.")
 
 
-def initialize_project_budget(run_id: str, prior_unbilled_reserve_cu: float = PRIOR_TASK_UNBILLED_RESERVE_CU) -> dict:
+def initialize_project_budget(run_id: str, prior_unbilled_reserve_cu: float = PRIOR_TASK_UNBILLED_RESERVE_CU,
+                              authorize_new_task: bool = False) -> dict:
     live = read_live_usage(_COLAB_AUTH)
     if live.get("balance") is None:
         raise RuntimeError("Cannot parse CU balance; abort")
     return load_or_create_budget_ledger(LEDGER_PATH, live["balance"], run_id,
-                                        prior_unbilled_reserve_cu=prior_unbilled_reserve_cu)
+                                        prior_unbilled_reserve_cu=prior_unbilled_reserve_cu,
+                                        authorize_new_task=authorize_new_task)
 
 
 def probe_actual_gpu(session: str, choice_key: str) -> dict:
@@ -779,10 +781,21 @@ def reconcile_run_state(run_id: str) -> dict:
 
 
 def run_variant(args) -> dict:
-    global _EXEC_LOG_DIR
+    global _EXEC_LOG_DIR, LEDGER_PATH, PRODUCTION_TASK_ID
     variant = args.variant
     if variant not in ("A", "B"):
         raise ValueError("variant must be A or B")
+    # TASK-002 §5.2: the production task must be named explicitly. The
+    # historical default h3-ab-20261111 is never reused silently: a new
+    # RUN_ID without --production-task-id used to bind to the old task's
+    # ledger. An explicit old id still continues that task (e.g. the B
+    # re-run), but it must be typed out.
+    if not getattr(args, "production_task_id", ""):
+        raise RuntimeError("--production-task-id is required for run; the historical default is never reused silently")
+    # Bind the module ledger to this run's task (main() does the same for
+    # CLI runs; this keeps programmatic calls consistent too).
+    PRODUCTION_TASK_ID = args.production_task_id
+    LEDGER_PATH = ledger_path_for_task(ROOT, PRODUCTION_TASK_ID)
     if not all((args.execute, args.confirm_gpu, args.authorize_task_gpu, args.allow_g4, args.allow_a100_highmem)):
         raise RuntimeError("GPU blocked: require --execute --confirm-gpu --authorize-task-gpu --allow-g4 --allow-a100-highmem")
     if float(args.project_budget_cu) != PROJECT_BUDGET_CU or float(args.per_session_budget_cu) != PER_SESSION_BUDGET_CU:
@@ -809,7 +822,8 @@ def run_variant(args) -> dict:
     verify_ready(drive, same_account, Path(args.cache_manifest))
     ledger = initialize_project_budget(args.run_id,
                                        prior_unbilled_reserve_cu=getattr(args, "prior_unbilled_reserve_cu",
-                                                                         PRIOR_TASK_UNBILLED_RESERVE_CU))
+                                                                         PRIOR_TASK_UNBILLED_RESERVE_CU),
+                                       authorize_new_task=getattr(args, "authorize_new_task", False))
     pre = inspect()
     if pre["cu_balance"] is None:
         raise RuntimeError("Cannot parse CU balance; abort")
@@ -896,7 +910,8 @@ def run_variant(args) -> dict:
         deadline = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=initial_sec)
         from h3_session_watchdog import record_session
 
-        session_rec = record_session(session, chosen_key, args.run_id, deadline.isoformat())
+        session_rec = record_session(session, chosen_key, args.run_id, deadline.isoformat(),
+                                     production_task_id=args.production_task_id)
         watchdog_proc = None
         try:
             watchdog_proc = subprocess.Popen(
@@ -1093,7 +1108,13 @@ def main():
     parser.add_argument("--budget-cu", type=float, default=0.0)
     parser.add_argument("--project-budget-cu", type=float, default=PROJECT_BUDGET_CU)
     parser.add_argument("--per-session-budget-cu", type=float, default=PER_SESSION_BUDGET_CU)
-    parser.add_argument("--production-task-id", default=DEFAULT_PRODUCTION_TASK_ID)
+    parser.add_argument("--production-task-id", default="",
+                        help="Required for run. The historical task h3-ab-20261111 is never "
+                             "used implicitly; type it out to continue that task, or pass a "
+                             "new id together with --authorize-new-task.")
+    parser.add_argument("--authorize-new-task", action="store_true",
+                        help="Explicit user authorization to create a NEW 30 CU task ledger. "
+                             "Required when no ledger exists yet for --production-task-id.")
     parser.add_argument("--prior-unbilled-reserve-cu", type=float, default=PRIOR_TASK_UNBILLED_RESERVE_CU)
     parser.add_argument("--gpu-policy", default="G4_THEN_A100_HIGHMEM")
     parser.add_argument("--variant", choices=("A", "B"), default=None)
@@ -1106,8 +1127,11 @@ def main():
         parser.add_argument("--" + flag, action="store_true")
     a = parser.parse_args()
     _COLAB_AUTH = a.colab_auth
-    PRODUCTION_TASK_ID = a.production_task_id
-    LEDGER_PATH = ledger_path_for_task(ROOT, PRODUCTION_TASK_ID)
+    if a.action == "run" and not a.production_task_id:
+        parser.error("--production-task-id is required for run; the historical default is never reused silently")
+    if a.production_task_id:
+        PRODUCTION_TASK_ID = a.production_task_id
+        LEDGER_PATH = ledger_path_for_task(ROOT, PRODUCTION_TASK_ID)
     PRIOR_TASK_UNBILLED_RESERVE_CU = float(a.prior_unbilled_reserve_cu)
     if a.action == "run" and not a.variant:
         parser.error("--variant A|B is required for run")

@@ -47,7 +47,9 @@ python scripts/check_docs_index.py
 ./scripts/verify_shutdown.sh
 
 # Live GPU run (spends CU; operator + TTY + explicit confirmation only)
-./scripts/run_h3_ab.sh --confirm-live --variant A --run-id h3-<UTC>-<suffix>
+# --production-task-id is required: a new task id never gets a fresh
+# 30 CU silently; add --authorize-new-task only with user approval.
+./scripts/run_h3_ab.sh --confirm-live --production-task-id h3-ab-20261112 --variant A --run-id h3-<UTC>-<suffix>
 ```
 
 ## Making changes

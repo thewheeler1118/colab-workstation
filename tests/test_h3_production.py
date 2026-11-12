@@ -90,7 +90,7 @@ class ProductionTest(unittest.TestCase):
     def test_budget_baseline_not_reset(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "ledger.json"
-            first = load_or_create_budget_ledger(p, 165.27, "h3-run-1")
+            first = load_or_create_budget_ledger(p, 165.27, "h3-run-1", authorize_new_task=True)
             self.assertEqual(first["initial_balance_cu"], 165.27)
             self.assertEqual(first["hard_stop_balance_cu"], 135.27)
             second = load_or_create_budget_ledger(p, 160.00, "h3-run-2")
@@ -102,7 +102,7 @@ class ProductionTest(unittest.TestCase):
     def test_budget_persists_across_restart(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "ledger.json"
-            load_or_create_budget_ledger(p, 165.27, "h3-run-1")
+            load_or_create_budget_ledger(p, 165.27, "h3-run-1", authorize_new_task=True)
             loaded = json.loads(p.read_text())
             self.assertEqual(loaded["initial_balance_cu"], 165.27)
             self.assertEqual(oct(p.stat().st_mode & 0o777), "0o600")
@@ -114,7 +114,7 @@ class ProductionTest(unittest.TestCase):
         self.assertEqual(CLEANUP_RESERVE_CU, 0.75)
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "ledger.json"
-            ledger = load_or_create_budget_ledger(p, 165.27, "r1")
+            ledger = load_or_create_budget_ledger(p, 165.27, "r1", authorize_new_task=True)
             # 25 CU session, 24.5 CU already spent in-session -> usable < reserve
             with self.assertRaises(RuntimeError):
                 allowed_runtime_seconds(10.0, 165.27, ledger, session_spent_cu=24.5)
@@ -128,7 +128,7 @@ class ProductionTest(unittest.TestCase):
         # the old fixed 3600 s cap: the session must not be cut off by it.
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "ledger.json"
-            ledger = load_or_create_budget_ledger(p, 165.27, "r1")
+            ledger = load_or_create_budget_ledger(p, 165.27, "r1", authorize_new_task=True)
             self.assertGreater(allowed_runtime_seconds(8.88, 163.21, ledger), 3600)
 
     def test_worker_done_marker_required(self):
@@ -183,7 +183,7 @@ class ProductionTest(unittest.TestCase):
     def test_unknown_gpu_rate_rejected(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "ledger.json"
-            ledger = load_or_create_budget_ledger(p, 165.27, "r1")
+            ledger = load_or_create_budget_ledger(p, 165.27, "r1", authorize_new_task=True)
             with self.assertRaises(RuntimeError):
                 allowed_runtime_seconds(0, 165.27, ledger)
             with self.assertRaises(RuntimeError):
@@ -487,7 +487,7 @@ class ProductionTest(unittest.TestCase):
         # must fail closed, never be silently accepted.
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "ledger.json"
-            led = load_or_create_budget_ledger(p, 165.27, "run-1")
+            led = load_or_create_budget_ledger(p, 165.27, "run-1", authorize_new_task=True)
             led["project_budget_cu"] = 60.0
             led["hard_stop_balance_cu"] = 105.27
             p.write_text(json.dumps(led))
@@ -500,7 +500,7 @@ class ProductionTest(unittest.TestCase):
         # previous task cannot push the account below the floor.
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "ledger.json"
-            led = load_or_create_budget_ledger(p, 162.77, "run-1", prior_unbilled_reserve_cu=0.14)
+            led = load_or_create_budget_ledger(p, 162.77, "run-1", prior_unbilled_reserve_cu=0.14, authorize_new_task=True)
             self.assertEqual(led["hard_stop_balance_cu"], 132.77)
             self.assertEqual(led["prior_task_unbilled_reserve_cu"], 0.14)
             self.assertEqual(led["effective_hard_stop_balance_cu"], 132.91)
@@ -579,7 +579,7 @@ class ProductionTest(unittest.TestCase):
     def test_ab_share_one_project_budget(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "ledger.json"
-            a = load_or_create_budget_ledger(p, 165.27, "h3-run-A")
+            a = load_or_create_budget_ledger(p, 165.27, "h3-run-A", authorize_new_task=True)
             reconcile_budget(a, 160.27, p)
             self.assertEqual(a["max_observed_spent_cu"], 5.0)
             b = load_or_create_budget_ledger(p, 160.27, "h3-run-B")
