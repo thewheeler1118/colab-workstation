@@ -467,8 +467,8 @@
     },
     {
       "path": "docs/v3_progress.md",
-      "size_bytes": 11968,
-      "sha256": "0d4bd4e350cec801315310eee45b61b357063ff7b873630dfe0892bb7b5d837c",
+      "size_bytes": 11973,
+      "sha256": "097248cca709b1843a44fa944e13f2516d61d02be8c97509ea9d139580d9180a",
       "role": "Documentation / evidence"
     },
     {
@@ -515,8 +515,8 @@
     },
     {
       "path": "h3_comfyui_cache.py",
-      "size_bytes": 12408,
-      "sha256": "519ef9e9c8dde64645f0a8bd09d257796f3ec0f2464c3b396293087d9dc6d6bd",
+      "size_bytes": 12381,
+      "sha256": "aaea4e824b1c882879d05104b3e079eb2afc71a5275f8fb91810fa21f5334356",
       "role": "ComfyUI source archive build / verify / publish to Drive cache"
     },
     {
@@ -648,13 +648,13 @@
     {
       "path": "reference_v2/README.md",
       "size_bytes": 1956,
-      "sha256": "30191ed3d3a2d5e62a91d87305837e62be5bf5517cd16cd93501b34e5f53728f",
+      "sha256": "1f6168b2eef466739de09c458d55a3aed15e91b91a03a6d0094a56e67f106b2a",
       "role": "Supporting file"
     },
     {
       "path": "reference_v2/colab_manager.py",
-      "size_bytes": 145713,
-      "sha256": "cc3fd0b70ad343b322f57cc81ca4c33901ceacfe37449f0bdc649198fa2d5690",
+      "size_bytes": 145688,
+      "sha256": "c7f7a9103beff8c5d974bfb2b99f8273787490c7e7ed533555d318e075710300",
       "role": "Vendored CLI output parsing (usage/sessions) + log redaction"
     },
     {

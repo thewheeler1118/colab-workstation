@@ -1,8 +1,7 @@
 """Build and publish the pinned ComfyUI source cache to Google Drive.
 
 The cache lives OUTSIDE the model depot, in a dedicated folder
-``Muse-H3-ComfyUI-Source`` in the same authorized Google account
-(thewheeler1118@gmail.com). It holds exactly three files:
+``Muse-H3-ComfyUI-Source`` in the same authorized Google account. It holds exactly three files:
 
   comfyui-<commit>.tar.gz        git archive of the pinned commit
                                   (prefix comfyui/, plus a COMFYUI_COMMIT.txt
