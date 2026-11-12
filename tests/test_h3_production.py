@@ -621,7 +621,21 @@ class ProductionTest(unittest.TestCase):
     def test_cli_post_body_patch_present(self):
         # Fail-closed: if the venv is rebuilt without the 2026-11-11
         # POST-body workaround, empty POSTs return 411 again.
-        self.assertTrue(cli_post_body_patch_present())
+        # Verified offline against the vendored pristine 0.7.5 fixture:
+        # pristine reports absent, patch-applied reports present.
+        fixtures = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "pristine-colab-cli-0.7.5" / "colab_cli"
+        patch_dir = Path(__file__).resolve().parents[1] / "patches" / "google-colab-cli-0.7.5"
+        import shutil
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp) / "site-packages"
+            shutil.copytree(fixtures, tree / "colab_cli")
+            self.assertFalse(cli_post_body_patch_present([str(tree)]))
+            for name in ("proxy_post_body.patch", "drivemount_timeout.patch"):
+                subprocess.run(["git", "apply", str(patch_dir / name)],
+                               cwd=str(tree), check=True, capture_output=True, text=True)
+            self.assertTrue(cli_post_body_patch_present([str(tree)]))
 
     # 2026-11-11: A100-HM allocated fine, but the first probe exec failed
     # with jupyter-kernel-client's 10s REQUEST_TIMEOUT. run_cli must raise
@@ -639,7 +653,9 @@ class ProductionTest(unittest.TestCase):
             captured["env"] = k.get("env")
             return FakeProc()
 
-        with mock.patch.object(hc.subprocess, "run", fake_run):
+        with mock.patch.object(hc.subprocess, "run", fake_run), \
+                mock.patch.object(hc, "resolve_colab_executable",
+                                  return_value="/usr/bin/colab"):
             run_cli(["usage"], timeout=10, check=False)
         self.assertEqual(captured["env"]["REQUEST_TIMEOUT"], "120")
         self.assertEqual(captured["env"]["COLAB_CLI_REQUEST_TIMEOUT"], "180")

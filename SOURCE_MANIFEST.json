@@ -23,8 +23,8 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "size_bytes": 2932,
-      "sha256": "e4d1b4366d14748575c05b95ccc3cfcc5038462bfa0ee00ec028f160345d55c6",
+      "size_bytes": 3889,
+      "sha256": "062c68c75e11e4e4c34b3daaac6d8e9e17d8c5a1d9bbb35581a9006bb820a518",
       "role": "CI / templates"
     },
     {
@@ -527,8 +527,8 @@
     },
     {
       "path": "h3_controller.py",
-      "size_bytes": 53324,
-      "sha256": "b8466d0d69ad7f8ed52b72eb4ee66d9ff90ae3b3d47454fccd10c90c74ef25b2",
+      "size_bytes": 53886,
+      "sha256": "4e921e7f2dd28daee192811e1f1035c7f46fcaf3da433a3f28374a60153e6c16",
       "role": "Run orchestration: preflight, allocation, mount, worker exec, download, stop"
     },
     {
@@ -653,8 +653,8 @@
     },
     {
       "path": "reference_v2/colab_manager.py",
-      "size_bytes": 145427,
-      "sha256": "26fbb743e84784dd08b1fa619e402235a882045d32856852a3fc0f1d01dfcb6a",
+      "size_bytes": 145713,
+      "sha256": "cc3fd0b70ad343b322f57cc81ca4c33901ceacfe37449f0bdc649198fa2d5690",
       "role": "Vendored CLI output parsing (usage/sessions) + log redaction"
     },
     {
@@ -662,6 +662,12 @@
       "size_bytes": 33988,
       "sha256": "47a3d3eb288b4ba77e7eb1917e874c5cc81903207edc80952a026d2e5b2c1e45",
       "role": "Vendored video parameter validation (imported by colab_manager)"
+    },
+    {
+      "path": "requirements-ci.txt",
+      "size_bytes": 272,
+      "sha256": "b75be167bad311ea43d796e09e519fe92efb4afe1cddbec65df110ebea31e9c3",
+      "role": "CI-only offline test dependencies (pins from requirements.lock)"
     },
     {
       "path": "requirements-local.txt",
@@ -712,9 +718,21 @@
       "role": "Operator wrapper / offline check"
     },
     {
+      "path": "scripts/regenerate_manifest.py",
+      "size_bytes": 3753,
+      "sha256": "770abb80a688adf81d4809614a964ab07b6cda0b2095e62b254dbfd0e15f29c7",
+      "role": "Operator wrapper / offline check"
+    },
+    {
       "path": "scripts/run_h3_ab.sh",
       "size_bytes": 1670,
       "sha256": "60fabd3b85ca5e08f8f76eb82419c9f1ba5d04ec55ba306711a4b7052c109ebb",
+      "role": "Operator wrapper / offline check"
+    },
+    {
+      "path": "scripts/secret_scan.py",
+      "size_bytes": 5012,
+      "sha256": "ea49216469315d043637a4a8111f69569d959210122164e5ef00cb41b6973cd8",
       "role": "Operator wrapper / offline check"
     },
     {
@@ -740,6 +758,24 @@
       "size_bytes": 1155,
       "sha256": "f4e6e45b2c3494ccd9731a63850fe8e3a335b02d9732b0bfd5df0f2a6eada065",
       "role": "Operator wrapper / offline check"
+    },
+    {
+      "path": "tests/fixtures/pristine-colab-cli-0.7.5/README.md",
+      "size_bytes": 1220,
+      "sha256": "d83a68f0448d6c460b21d93d3e17d1d86a950a9f96c73c30ec5ab0f5f5e3ca9d",
+      "role": "Test fixture (pristine upstream source, read-only)"
+    },
+    {
+      "path": "tests/fixtures/pristine-colab-cli-0.7.5/colab_cli/client.py",
+      "size_bytes": 11772,
+      "sha256": "7081d2c9decbc9a4cafb4ab89202c7e7a644f72bd74a7e846bffce5344839a06",
+      "role": "Test fixture (pristine upstream source, read-only)"
+    },
+    {
+      "path": "tests/fixtures/pristine-colab-cli-0.7.5/colab_cli/commands/automation.py",
+      "size_bytes": 9805,
+      "sha256": "229a11e791570c592291b41ab3c4f7d17719b6590b4032a0f0fd40f71dd94186",
+      "role": "Test fixture (pristine upstream source, read-only)"
     },
     {
       "path": "tests/live_drive_resume_check.py",
@@ -797,14 +833,14 @@
     },
     {
       "path": "tests/test_h3_mount_repair.py",
-      "size_bytes": 21707,
-      "sha256": "e7185b9e1af8a940936034d881c4871ee86ecfe2381d8f984b7c2f434a199987",
+      "size_bytes": 24032,
+      "sha256": "7ae12b90c3dc033148522049d7f6c95f4260913cb251950076360cd74616f733",
       "role": "Tests: mount repair, CLI patches, budget/watchdog/restore gates (31 tests)"
     },
     {
       "path": "tests/test_h3_production.py",
-      "size_bytes": 40423,
-      "sha256": "0af608d59469104584e91b7c06f5069b7e565e54b9b1e8b267950ba8cdc37445",
+      "size_bytes": 41443,
+      "sha256": "ebc917e105bfd614d9fdf7e386801eed99c7b655b977a2f5c4c42a97c4b6bd8b",
       "role": "Tests: production flow incl. worker marker, stop, parsers (63 tests)"
     },
     {

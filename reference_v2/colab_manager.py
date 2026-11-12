@@ -183,6 +183,10 @@ GPU_HARDWARE_CATALOG: Dict[str, Dict[str, Any]] = {
 # 敏感凭据脱敏工具
 # ============================================================================
 
+# secret-scan: scrubber-patterns-begin
+# NOTE: the regexes below MATCH secrets so log output can be scrubbed.
+# They are patterns, not credential values. scripts/secret_scan.py
+# exempts exactly this delimited block (and nothing else in this file).
 _SENSITIVE_PATTERNS: List[Tuple[re.Pattern[str], str]] = [
     (re.compile(r"ya29\.[A-Za-z0-9_\-\.]+"), "ya29.[REDACTED_ACCESS_TOKEN]"),
     (re.compile(r"1//[A-Za-z0-9_\-\.]+"), "1//[REDACTED_REFRESH_TOKEN]"),
@@ -204,6 +208,7 @@ _SENSITIVE_PATTERNS: List[Tuple[re.Pattern[str], str]] = [
         "[REDACTED_PRIVATE_KEY_BLOCK]",
     ),
 ]
+# secret-scan: scrubber-patterns-end
 
 
 def redact_sensitive_text(text: str) -> str:
