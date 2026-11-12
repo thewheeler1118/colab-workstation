@@ -1,0 +1,6 @@
+# CI-only offline test dependencies.
+# Pins are taken from requirements.lock (verified source venv, 2026-11-12);
+# do not hand-edit pins — regenerate from a tested venv.
+# Python 3.11 and 3.12 (CI matrix) are both supported by these pins.
+requests==2.34.2
+PyYAML==6.0.3

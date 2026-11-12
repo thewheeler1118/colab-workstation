@@ -180,23 +180,69 @@ class TimelineTest(unittest.TestCase):
 
 
 class CliPatchTest(unittest.TestCase):
-    def test_drivemount_timeout_patch_present(self):
-        self.assertTrue(cli_drivemount_timeout_patch_present())
+    """Patch-presence checks against isolated fixture trees (TASK-002 §3.4).
 
-    def test_post_body_patch_still_present(self):
-        self.assertTrue(cli_post_body_patch_present())
+    The checks take an explicit search root, so these tests never depend
+    on the machine's installed CLI: pristine 0.7.5 fixture files must
+    report "absent", and the same files with the vendored patches applied
+    in a temp dir must report "present" — with the real marker strings.
+    No GPU, no network, no installed CLI is touched. The production
+    preflight still calls the checks with no argument (real site-packages).
+    """
+
+    FIXTURES = ROOT / "tests" / "fixtures" / "pristine-colab-cli-0.7.5" / "colab_cli"
+    PATCH_DIR = ROOT / "patches" / "google-colab-cli-0.7.5"
+
+    def _pristine_tree(self, tmp):
+        import shutil
+
+        tree = Path(tmp) / "site-packages"
+        shutil.copytree(self.FIXTURES, tree / "colab_cli")
+        return tree
+
+    def _apply_vendored_patches(self, tree):
+        for name in ("proxy_post_body.patch", "drivemount_timeout.patch"):
+            subprocess.run(
+                ["git", "apply", str(self.PATCH_DIR / name)],
+                cwd=str(tree), check=True, capture_output=True, text=True,
+            )
+
+    def test_pristine_cli_reports_patch_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = self._pristine_tree(tmp)
+            self.assertFalse(cli_drivemount_timeout_patch_present([str(tree)]))
+            self.assertFalse(cli_post_body_patch_present([str(tree)]))
+
+    def test_patched_cli_reports_patch_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = self._pristine_tree(tmp)
+            self._apply_vendored_patches(tree)
+            self.assertTrue(cli_drivemount_timeout_patch_present([str(tree)]))
+            self.assertTrue(cli_post_body_patch_present([str(tree)]))
 
     def test_injected_code_contains_timeout(self):
-        import site
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = self._pristine_tree(tmp)
+            self._apply_vendored_patches(tree)
+            found = (tree / "colab_cli" / "commands" / "automation.py").read_text(
+                encoding="utf-8", errors="ignore")
+            self.assertIn("drive.mount('{path}', timeout_ms=600000)", found)
+            self.assertIn("INTERACTIVE_AUTOMATION_TIMEOUT_SEC = 660", found)
 
-        found = None
-        for base in site.getsitepackages():
-            candidate = Path(base) / "colab_cli" / "commands" / "automation.py"
-            if candidate.exists():
-                found = candidate.read_text(encoding="utf-8", errors="ignore")
-        self.assertIsNotNone(found)
-        self.assertIn("drive.mount('{path}', timeout_ms=600000)", found)
-        self.assertIn("INTERACTIVE_AUTOMATION_TIMEOUT_SEC = 660", found)
+    def test_post_body_patch_still_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = self._pristine_tree(tmp)
+            self._apply_vendored_patches(tree)
+            found = (tree / "colab_cli" / "client.py").read_text(
+                encoding="utf-8", errors="ignore")
+            self.assertIn('kwargs["data"] = b"{}"', found)
+            self.assertIn('if method == "POST"', found)
+
+    def test_default_check_returns_bool_without_installed_cli(self):
+        # In a clean checkout there may be no installed colab_cli at all;
+        # the no-argument check must simply report False, never raise.
+        self.assertIsInstance(cli_post_body_patch_present(), bool)
+        self.assertIsInstance(cli_drivemount_timeout_patch_present(), bool)
 
 
 class SignatureProbeTest(unittest.TestCase):
