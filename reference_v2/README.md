@@ -24,7 +24,7 @@ migration log records this instead of hiding it.
 `reference_v2/config.yaml` was NOT migrated: no production code path
 loads it — `colab_manager.load_yaml_config` takes an explicit path and
 is never called by the H3 controller or the tests — and the file holds a
-hardcoded Mac user path (`/Users/skycjq/.local/bin/colab`) plus SVD
+hardcoded Mac user path (`/Users/<USER>/.local/bin/colab`) plus SVD
 model settings unrelated to the MiniMax-H3 job. `reference_v2/AGENTS.md`
 and its requirements files were also not migrated.
 

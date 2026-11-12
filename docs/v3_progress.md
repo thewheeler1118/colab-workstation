@@ -10,8 +10,8 @@
   plan 正常。海报 SHA-256 与合同一致；海报 MD5 与 Drive 插件侧一致
   （33f99bdfa5deca5607364737ab9521eb）。
 - gcloud：官方 tarball 装于 ~/google-cloud-sdk/google-cloud-sdk/，版本 592.0.0。
-- Drive 插件：已连接，账号 thewheeler1118@gmail.com；海报与剧本两个 File ID
-  均可读（属主 alfaromeo192021@gmail.com，共享可见）；Drive 配额上限约 5TB，
+- Drive 插件：已连接，账号 [GOOGLE_ACCOUNT_REDACTED]；海报与剧本两个 File ID
+  均可读（属主 [GOOGLE_ACCOUNT_REDACTED]，共享可见）；Drive 配额上限约 5TB，
   已用约 3.4GB。本地 storyboard.md（1332 字节）是 Drive 完整剧本（3305 字节）
   的摘录版，内容主线一致。
 - HF 已 pin：revision 54472221d27c695fca9621b0c3ed52f06c4af707（40 位）。
@@ -29,11 +29,11 @@
      同意屏幕/测试用户、Drive restricted scope），把客户端 JSON 以文件附件发来，
      我会放到 $HOME/private/desktop_oauth_client.json（目录 0700、文件 0600）。
   2. 在交互终端执行 gcloud ADC 授权命令（见最终报告/聊天），授权码只贴回原终端。
-     授权账号必须是 thewheeler1118@gmail.com（与 Drive 插件同一账号），
+     授权账号必须是 [GOOGLE_ACCOUNT_REDACTED]（与 Drive 插件同一账号），
      否则 account-check 会失败。
 - 未做的：未发起任何 OAuth/ADC 授权，未创建 GPU，未消耗 CU，未上传/下载模型。
 - 2026-11-10 04:05 UTC：浏览器任务完成。新建项目 muse-h3-colab（编号 493117617570），
-  Drive API 已启用，同意屏幕 External/Testing、测试用户 thewheeler1118@gmail.com、
+  Drive API 已启用，同意屏幕 External/Testing、测试用户 [GOOGLE_ACCOUNT_REDACTED]、
   六个 scope 已保存、受限 Drive scope 未被拒；Desktop 客户端 Muse H3 Desktop 已建。
   客户端 JSON 已核对（client_id 与报告一致、project muse-h3-colab）并移入
   $HOME/private/desktop_oauth_client.json（目录 0700、文件 0600），浏览器下载副本已删。
@@ -50,9 +50,9 @@
   - ADC audit：present、mode 0600、credentials 未读取。
   - colab --auth=adc version 0.7.5；usage：余额 165.27 CU（与历史基线一致，
     硬停线 153.82 → 剩余 11.45 CU）、费率 0.00/hr、活跃会话 0。
-  - sessions：无活跃会话。whoami：thewheeler1118@gmail.com，
+  - sessions：无活跃会话。whoami：[GOOGLE_ACCOUNT_REDACTED]，
     Audience 为本客户端 ID，七项 scope 齐全，token 59 分钟有效。
-  - Drive about.get（API 直连）：thewheeler1118@gmail.com。
+  - Drive about.get（API 直连）：[GOOGLE_ACCOUNT_REDACTED]。
   - account-check：{"same_google_account": true, "no_gpu_created": true}。
   同意屏幕 External/Testing，refresh token 可能 7 天过期，须实测刷新行为，不承诺永久。
 - Muse VM 传输适配（2026-11-10，均为最小增量补丁，已记入最终报告，包内其余代码未动）：
