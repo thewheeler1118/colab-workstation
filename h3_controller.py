@@ -780,6 +780,37 @@ def reconcile_run_state(run_id: str) -> dict:
     return {"run_id": run_id, "ledger": ledger, "watchdog": reconcile_on_startup(_COLAB_AUTH)}
 
 
+def _wait_watchdog_ready(proc, ready_path: Path, session: str, production_task_id: str,
+                         timeout_sec: float = 15.0) -> dict:
+    """Fail-closed watchdog startup gate (TASK-002 §6.1). Wait until the
+    watchdog process proves it is ready — alive, holding this session's
+    record, bound to the same production task — by writing `ready_path`.
+    Any other outcome (early exit, readiness mismatch, timeout) raises
+    WATCHDOG_NOT_RUNNING so the caller aborts before inference and the
+    outer finally releases the just-created GPU session."""
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            raise RuntimeError(
+                f"WATCHDOG_NOT_RUNNING: watchdog exited with code {proc.returncode} "
+                f"before signalling readiness for session {session}")
+        if ready_path.exists():
+            try:
+                ready = json.loads(ready_path.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001 - partial write; keep waiting
+                pass
+            else:
+                if ready.get("session_id") == session and ready.get("production_task_id") == production_task_id:
+                    return ready
+                raise RuntimeError(
+                    "WATCHDOG_NOT_RUNNING: watchdog readiness mismatch for session "
+                    f"{session}: got {ready}")
+        time.sleep(0.25)
+    raise RuntimeError(
+        f"WATCHDOG_NOT_RUNNING: watchdog did not signal readiness for session {session} "
+        f"within {timeout_sec:g}s")
+
+
 def run_variant(args) -> dict:
     global _EXEC_LOG_DIR, LEDGER_PATH, PRODUCTION_TASK_ID
     variant = args.variant
@@ -828,12 +859,27 @@ def run_variant(args) -> dict:
     if pre["cu_balance"] is None:
         raise RuntimeError("Cannot parse CU balance; abort")
     ensure_no_foreign_sessions(pre)
-    # Watchdog reconciliation: any managed session still active blocks a new allocation.
+    # Watchdog reconciliation: any managed session still active blocks a
+    # new allocation. An unconfirmable leftover is a hard stop, never a
+    # reason to run a second GPU in parallel — and never a reason to stop
+    # a session that is not one of ours.
     from h3_session_watchdog import reconcile_on_startup
 
     rec = reconcile_on_startup(_COLAB_AUTH)
     if rec.get("managed_active_sessions"):
-        raise RuntimeError(f"Managed GPU sessions still active: {rec['managed_active_sessions']}; stop them first")
+        detail = rec.get("managed_active_detail") or [
+            {"session_id": s} for s in rec["managed_active_sessions"]]
+        lines = []
+        for d in detail:
+            est = d.get("unbilled_estimate_cu")
+            lines.append(
+                f"{d.get('session_id')} (run {d.get('run_id')}, task {d.get('production_task_id')}, "
+                f"deadline {d.get('deadline_utc')}, unbilled estimate "
+                f"{est if est is not None else 'unconfirmable'} CU)")
+        raise RuntimeError(
+            "CRITICAL_ORPHAN_GPU_SESSION: managed GPU session(s) still active; refusing to allocate "
+            "another GPU in parallel. Stop them first (never stop non-project sessions): "
+            + "; ".join(lines))
     probe = run_cli(['drivemount','--help'], timeout=20, check=False)
     if probe["returncode"] != 0:
         raise RuntimeError("Official Colab drivemount unavailable")
@@ -912,16 +958,34 @@ def run_variant(args) -> dict:
 
         session_rec = record_session(session, chosen_key, args.run_id, deadline.isoformat(),
                                      production_task_id=args.production_task_id)
+        # Fail-closed watchdog startup (TASK-002 §6.1): the watcher must
+        # prove it is alive, holding this session's record, and bound to
+        # this task before any inference. On any startup failure the
+        # exception propagates to the outer finally, which stops and
+        # verifies the just-created GPU session.
+        ready_path = run_dir / f"watchdog_{variant}_ready.json"
         watchdog_proc = None
         try:
             watchdog_proc = subprocess.Popen(
                 [sys.executable, str(ROOT / "h3_session_watchdog.py"), "watch", "--session", session,
-                 "--production-task-id", getattr(args, "production_task_id", PRODUCTION_TASK_ID)],
+                 "--production-task-id", getattr(args, "production_task_id", PRODUCTION_TASK_ID),
+                 "--ready-file", str(ready_path)],
                 stdout=open(run_dir / f"watchdog_{variant}.log", "a"),
                 stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
             )
+            _wait_watchdog_ready(watchdog_proc, ready_path, session, args.production_task_id)
+            record({"event": "watchdog_ready", "session": session, "ready_file": str(ready_path)})
         except Exception as e:  # noqa: BLE001
             record({"event": "watchdog_start_failed", "session": session, "error": str(e)[:300]})
+            if watchdog_proc is not None:
+                try:
+                    if watchdog_proc.poll() is None:
+                        watchdog_proc.terminate()
+                except Exception:  # noqa: BLE001 - already failing; do not mask it
+                    pass
+            if isinstance(e, RuntimeError) and str(e).startswith("WATCHDOG_NOT_RUNNING"):
+                raise
+            raise RuntimeError(f"WATCHDOG_NOT_RUNNING: watchdog failed to start: {e}") from e
         try:
             # GPU hardware probe before any expensive work.
             gpu_info = probe_actual_gpu(session, chosen_key)

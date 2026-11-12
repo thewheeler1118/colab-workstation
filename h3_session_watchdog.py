@@ -161,18 +161,57 @@ def stop_session(session_id: str, colab_auth: str = "adc") -> bool:
 
 def reconcile_on_startup(colab_auth: str = "adc", path: Path = STATE_PATH) -> dict:
     """Called before any new GPU allocation: report managed sessions that
-    are still active. Never auto-stop a session that is not in our file."""
+    are still active. Never auto-stop a session that is not in our file.
+    Each active session is reported with its run/task/deadline and a
+    best-effort unbilled-cost estimate (None when the live rate cannot be
+    read — the cost is then unconfirmable, but the session still blocks).
+    A failure to query the live session list propagates: an unconfirmable
+    session state must fail closed, never silently allow a parallel GPU."""
     sessions = [s for s in load_managed_sessions(path) if s.get("status") == "active"]
+    rate = None
+    try:
+        from h3_budget import read_live_usage
+
+        live = read_live_usage(colab_auth)
+        rate = live.get("rate")
+    except Exception:  # noqa: BLE001 - rate is best-effort only
+        rate = None
     still = []
+    detail = []
     for s in sessions:
         if session_still_active(s["session_id"], colab_auth=colab_auth):
             still.append(s["session_id"])
-    return {"managed_active_sessions": still, "checked_at_utc": _utc_now()}
+            est = None
+            if rate is not None:
+                try:
+                    from h3_budget import estimate_unbilled_cu
+
+                    est = estimate_unbilled_cu(s.get("started_at_utc"), rate)
+                except Exception:  # noqa: BLE001 - estimate is best-effort only
+                    est = None
+            detail.append({
+                "session_id": s["session_id"],
+                "run_id": s.get("run_id"),
+                "production_task_id": s.get("production_task_id"),
+                "deadline_utc": s.get("deadline_utc"),
+                "started_at_utc": s.get("started_at_utc"),
+                "unbilled_estimate_cu": est,
+            })
+    return {"managed_active_sessions": still, "managed_active_detail": detail,
+            "checked_at_utc": _utc_now()}
 
 
-def watch(session_id: str, colab_auth: str = "adc", poll_sec: int = 60) -> int:
+def watch(session_id: str, colab_auth: str = "adc", poll_sec: int = 60,
+          production_task_id: str = "", ready_path: Path | None = None) -> int:
     """Poll until the managed session's deadline / hard-stop, then stop it.
-    Exits 0 when the session is confirmed gone, 1 otherwise."""
+    Exits 0 when the session is confirmed gone, 1 otherwise.
+
+    Before polling, the watchdog proves it is ready and writes a
+    readiness file (when `ready_path` is given): it has read the managed
+    record, confirmed the deadline parses, is bound to the same
+    production task id the controller asked for, and can resolve the
+    Colab CLI that executes the stop. Without that proof the controller
+    refuses to start inference (WATCHDOG_NOT_RUNNING)."""
     from h3_budget import read_live_usage
 
     sessions = load_managed_sessions()
@@ -180,6 +219,32 @@ def watch(session_id: str, colab_auth: str = "adc", poll_sec: int = 60) -> int:
     if rec is None:
         print(f"watchdog: no managed record for {session_id}", file=sys.stderr)
         return 1
+    bound_task = production_task_id or rec.get("production_task_id", "")
+    if rec.get("production_task_id") and production_task_id and rec["production_task_id"] != production_task_id:
+        print(f"watchdog: task mismatch for {session_id}: record {rec['production_task_id']} != {production_task_id}",
+              file=sys.stderr)
+        return 1
+    try:
+        deadline = datetime.datetime.fromisoformat(str(rec.get("deadline_utc", "")).replace("Z", "+00:00"))
+    except ValueError:
+        print(f"watchdog: unparseable deadline for {session_id}: {rec.get('deadline_utc')!r}", file=sys.stderr)
+        return 1
+    try:
+        from auth_support import resolve_colab_executable
+
+        resolve_colab_executable()
+    except Exception as e:  # noqa: BLE001 - no CLI means no stop authority
+        print(f"watchdog: cannot resolve Colab CLI (no stop authority): {e}", file=sys.stderr)
+        return 1
+    if ready_path is not None:
+        _atomic_write_json(Path(ready_path), {
+            "session_id": session_id,
+            "production_task_id": bound_task,
+            "run_id": rec.get("run_id"),
+            "deadline_utc": rec.get("deadline_utc"),
+            "ready_at_utc": _utc_now(),
+            "ledger_path": str(LEDGER_PATH),
+        })
     ledger = None
     if LEDGER_PATH.exists():
         from h3_budget import _validate_ledger
@@ -233,6 +298,8 @@ def main() -> int:
     p.add_argument("--session", required=True)
     p.add_argument("--poll-sec", type=int, default=60)
     p.add_argument("--production-task-id", default=DEFAULT_PRODUCTION_TASK_ID)
+    p.add_argument("--ready-file", default=None,
+                   help="Path the watchdog writes its readiness proof to once startup is confirmed.")
     p = sub.add_parser("reconcile")
     p.add_argument("--colab-auth", default="adc")
     p = sub.add_parser("stop")
@@ -246,7 +313,8 @@ def main() -> int:
     if a.cmd == "watch":
         global LEDGER_PATH
         LEDGER_PATH = ledger_path_for_task(ROOT, a.production_task_id)
-        return watch(a.session, poll_sec=a.poll_sec)
+        return watch(a.session, poll_sec=a.poll_sec, production_task_id=a.production_task_id,
+                     ready_path=Path(a.ready_file) if a.ready_file else None)
     if a.cmd == "reconcile":
         print(json.dumps(reconcile_on_startup(a.colab_auth), indent=2))
         return 0

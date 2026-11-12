@@ -527,8 +527,8 @@
     },
     {
       "path": "h3_controller.py",
-      "size_bytes": 60895,
-      "sha256": "e57631bff87fcbf6dc53f4d9da60e93593cc3dd5e092bfd0469e04bf13b77ce7",
+      "size_bytes": 64428,
+      "sha256": "2bc7792b3066495db1c1b7a46882fb7b6debbbfa0f4220bb97fbe342ce20da38",
       "role": "Run orchestration: preflight, allocation, mount, worker exec, download, stop"
     },
     {
@@ -587,8 +587,8 @@
     },
     {
       "path": "h3_session_watchdog.py",
-      "size_bytes": 10520,
-      "sha256": "81d42b3e45992e24d63e634e695ab6395b0ed4385b3ae7f7a6b2d75769ef85ad",
+      "size_bytes": 13875,
+      "sha256": "df3f2b7bd869220b25b1ae0a888d268a766948ba41ba5da1d5096de60e5308b4",
       "role": "Managed-session registry, deadline watchdog, stop + reconcile"
     },
     {
@@ -859,6 +859,12 @@
       "path": "tests/test_task_budget.py",
       "size_bytes": 9259,
       "sha256": "3b93a129f249659e9a2176b4481390ec3e168278f24503edddb38a79df9c540c",
+      "role": "Tests"
+    },
+    {
+      "path": "tests/test_watchdog_fail_closed.py",
+      "size_bytes": 9318,
+      "sha256": "e1c5910d2613426e7490dbf7275cecaa37ee25d76b757c3257504ca294517f50",
       "role": "Tests"
     },
     {
