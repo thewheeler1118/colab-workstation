@@ -527,8 +527,8 @@
     },
     {
       "path": "h3_controller.py",
-      "size_bytes": 53909,
-      "sha256": "72d5352745b7bb3db25b830828a2df4abf7dd50b78360bdac624d0101496cc0b",
+      "size_bytes": 59082,
+      "sha256": "f50a772438033aa275c2063f4e640d9794269e1eb8e0d643d30760d5209e26be",
       "role": "Run orchestration: preflight, allocation, mount, worker exec, download, stop"
     },
     {
@@ -812,6 +812,12 @@
       "size_bytes": 10092,
       "sha256": "979b7c601ba9a78db4fc8e0f9e5774a4f932d39963ca9fd2d32c18172fcb19e0",
       "role": "Tests: direct Drive download path (mocked)"
+    },
+    {
+      "path": "tests/test_drive_delivery.py",
+      "size_bytes": 6661,
+      "sha256": "8235e427092ffcca6fc4fc028ffbf91907d30b27146933b31903a3863b5435a8",
+      "role": "Tests"
     },
     {
       "path": "tests/test_drive_depot.py",
