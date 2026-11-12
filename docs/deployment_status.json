@@ -1,0 +1,29 @@
+{
+  "version": "v3-2026-11-10",
+  "north_star": "Muse Linux agent -> official Colab CLI -> G4 MiniMax-H3 -> A/B MP4; Google Drive persistent model depot",
+  "user_permissions": {
+    "persist_google_user_adc_in_muse": "approved_with_user_interactive_oauth",
+    "drive_full_scope_and_model_depot_seeding": "approved",
+    "conditional_A_B_G4_attempt": "approved_if_identity_ready_transport_workflow_and_existing_10cu_software_budget_gates_pass",
+    "new_CU_purchase": "not_approved",
+    "third_party_dfs_extension": "not_approved"
+  },
+  "verified_in_current_container": {
+    "offline_tests": 36,
+    "python_syntax": "passed",
+    "poster_reference_present": true,
+    "script_reference_present": true
+  },
+  "not_yet_verified": [
+    "Muse local installation of v3",
+    "Muse Google ADC identity",
+    "Muse plugin identity equivalence",
+    "Drive small file smoke",
+    "all four model uploads and Drive remote READY manifest",
+    "official Colab drivemount user interaction",
+    "ComfyUI /object_info API workflow",
+    "G4 runtime allocation",
+    "A/B video generation and MP4 frame QA",
+    "GPU stop and CU settlement"
+  ]
+}

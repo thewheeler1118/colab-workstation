@@ -1,0 +1,24 @@
+# Video profile for the MiniMax-H3 A/B job.
+# Values copied from h3_contract.py (the production contract) and verified
+# by tests/test_config_contract.py. Do not change without a PR that updates
+# h3_contract.py and the tests together.
+width: 736
+height: 1312
+fps: 24
+animation_frames: 226
+poster_frames: 48
+total_frames: 274
+steps: 25
+scheduler: beta
+seed_a: 42
+seed_b: 43
+use_turbo: false
+final_width: 1080
+final_height: 1920
+# Frame rule enforced by h3_contract.patch_api_workflow: 226 % 17 == 5.
+frame_rule_modulo: 17
+frame_rule_remainder: 5
+poster_sha256: bd6d45312f340234d0fa06af0de5284949b2196f280677dd44468a300075c7bb
+# Non-credential Drive references (file IDs only, no tokens).
+poster_drive_id: 1Punsy8qZKQktUcYyrNDpG46XMu_SWAJO
+story_drive_id: 1TTv-xyLsSLSvTL1jy9ewOFM4qXUKBwpP

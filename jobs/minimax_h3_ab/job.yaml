@@ -1,0 +1,47 @@
+# MiniMax-H3 A/B production job (task h3-ab-20261111)
+task_id: h3-ab-20261111
+job: minimax_h3_ab
+# Per-task independent budget (user-corrected rule, 2026-11-11 09:12).
+# NEVER sum across tasks; NEVER treat 30 CU as a top-up.
+task_budget_cu: 30.0
+per_session_budget_cu: 25.0
+cleanup_reserve_cu: 0.75
+max_session_seconds: 14400
+prior_task_unbilled_reserve_cu: 0.14
+gpu_policy: G4_THEN_A100_HIGHMEM
+gpu_attempt_plan: [G4, G4, A100_HIGH_MEM]
+video:
+  width: 736
+  height: 1312
+  fps: 24
+  animation_frames: 226
+  poster_frames: 48
+  total_frames: 274
+  steps: 25
+  scheduler: beta
+  seed_a: 42
+  seed_b: 43
+  use_turbo: false
+  final_width: 1080
+  final_height: 1920
+models:
+  hf_repo: Comfy-Org/MiniMax-H3
+  hf_revision: 54472221d27c695fca9621b0c3ed52f06c4af707
+  depot_root_drive_id: 1YmCfFOOsoMvREhdyHusBDy95C1eI4KE_
+  ready_manifest_drive_id: 1jLYefARIDs8VLtsCXJPuTU7zHXw0coly
+  total_bytes: 40073842159
+comfyui:
+  repo: https://github.com/Comfy-Org/ComfyUI.git
+  commit: 61e524bdba7a4e193b45c2697f1af83c1beb86d6
+  cache_drive_folder_id: 1MJXkdxXl4EMdKKMf2edpyRJLzQkYT86D
+  cache_archive_sha256: 3dca94e63945661778b79a9f784f415411748ebafeb54499570432ddf5f49a2f
+assets:
+  poster_drive_id: 1Punsy8qZKQktUcYyrNDpG46XMu_SWAJO
+  story_drive_id: 1TTv-xyLsSLSvTL1jy9ewOFM4qXUKBwpP
+  poster_sha256: bd6d45312f340234d0fa06af0de5284949b2196f280677dd44468a300075c7bb
+status:
+  variant_a: SUCCEEDED
+  variant_a_run_id: h3-20261112T090027Z-8b07c6
+  variant_b: PENDING_RERUN
+  variant_b_last_run_id: h3-20261112T093207Z-7ab515
+  variant_b_last_outcome: interrupted by VM restart ~09:48 UTC 2026-11-12; orphan A100 stopped; no MP4 produced

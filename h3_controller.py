@@ -1,0 +1,1042 @@
+"""Muse -> official colab CLI -> H3 G4/A100 orchestration.
+
+GPU DISABLED unless explicit flags. Single-variant `run` per invocation;
+A and B share one persistent per-task 30 CU ledger
+(model_cache/h3_production_budget_<production_task_id>.json).
+The pre-2026-11-11-08:25 ledger (model_cache/h3_production_budget_30cu.json)
+is archived read-only and never written again.
+
+Historical constants HIST_REMAIN=11.45 / HARD_STOP=153.82 are audit history
+only and are NEVER used as a budget gate in this file. The live gate is
+h3_budget.py: PROJECT_BUDGET_CU=30.0, PER_SESSION_BUDGET_CU=25.0.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime
+import json
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from pathlib import Path
+
+from h3_budget import (
+    PROJECT_BUDGET_CU,
+    PER_SESSION_BUDGET_CU,
+    CLEANUP_RESERVE_CU,
+    MAX_SESSION_SECONDS,
+    DEFAULT_PRODUCTION_TASK_ID,
+    GPU_CHOICES,
+    initial_session_wall_seconds,
+    ledger_path_for_task,
+    effective_hard_stop_cu,
+    allocation_command,
+    choose_gpu_candidate,
+    estimate_unbilled_cu,
+    effective_balance_cu,
+    is_capacity_failure,
+    is_transient_transport_error,
+    load_or_create_budget_ledger,
+    parse_gpu_probe_output,
+    parse_usage_text,
+    read_live_usage,
+    reconcile_budget,
+    allowed_runtime_seconds,
+)
+from h3_mount_timeline import (
+    build_mount_timeline,
+    read_history_events,
+    summarize_timeline,
+)
+from h3_contract import (
+    validate_model_cache_manifest,
+    validate_poster,
+    POSTER_SHA256,
+    POSTER_DRIVE_ID,
+    STORY_DRIVE_ID,
+)
+from auth_support import resolve_colab_executable, audit_user_adc_file
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / "reference_v2"))
+from colab_manager import parse_usage_output, parse_sessions_output, redact_sensitive_text
+
+RUNS = ROOT / "logs"
+REMOTE = "/content/muse_h3"
+OUTPUT_ROOT = ROOT / "output"
+# Per-task ledger (user budget rule 2026-11-11 09:12: one independent 30 CU
+# ledger per explicitly started production task). main() rebinds this from
+# --production-task-id; the default is the current task h3-ab-20261111.
+PRODUCTION_TASK_ID = DEFAULT_PRODUCTION_TASK_ID
+LEDGER_PATH = ledger_path_for_task(ROOT, PRODUCTION_TASK_ID)
+# Prior task's unbilled estimate for the current task (CU). Fixed at the
+# new ledger's creation and stored on it; the CLI default only matters
+# when the ledger file does not exist yet.
+PRIOR_TASK_UNBILLED_RESERVE_CU = 0.14
+_COLAB_AUTH = "adc"
+# Historical audit values only. Do not use as a gate.
+HIST_START = 171.82
+HIST_SPENT = 6.55
+HARD_STOP = 153.82
+HIST_REMAIN = 11.45
+COMFY_REF_DEFAULT = "61e524bdba7a4e193b45c2697f1af83c1beb86d6"
+
+
+def _comfyui_cache_task():
+    """ComfyUI source-cache descriptor for the remote worker's task.json,
+    from the local manifest built by h3_comfyui_cache.py. None when the
+    cache has not been built: the worker then falls back to git clone."""
+    manifest_path = ROOT / "model_cache" / "comfyui_source_manifest.json"
+    if not manifest_path.exists():
+        return None
+    manifest = json.loads(manifest_path.read_text())
+    return {
+        "dir": "/content/drive/MyDrive/Muse-H3-ComfyUI-Source",
+        "archive": manifest["archive_name"],
+        "sha256": manifest["sha256"],
+        "commit": manifest["commit"],
+    }
+
+
+def create_run_id() -> str:
+    return "h3-" + datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + __import__("secrets").token_hex(3)
+
+
+def record(data):
+    RUNS.mkdir(exist_ok=True)
+    data = {"utc": datetime.datetime.now(datetime.timezone.utc).isoformat(), **data}
+    with (RUNS / "h3_audit.jsonl").open("a") as f:
+        f.write(json.dumps(data, ensure_ascii=False) + "\n")
+
+
+def run_cli(cmd, timeout=90, check=True):
+    exe = resolve_colab_executable()
+    args = [exe, "--auth=" + _COLAB_AUTH, *cmd]
+    # 2026-11-11: jupyter-kernel-client's REQUEST_TIMEOUT defaults to 10s
+    # (env REQUEST_TIMEOUT in its constants.py). A freshly allocated
+    # A100-HM runtime's first kernel-start request takes longer than 10s
+    # through the egress proxy, so `colab exec` failed with
+    # ReadTimeout (read timeout=10) even though the runtime was healthy.
+    # Raise it for every CLI subprocess; COLAB_CLI_REQUEST_TIMEOUT does
+    # the same for the assign/usage requests in client.py.
+    env = {**os.environ, "REQUEST_TIMEOUT": "120", "COLAB_CLI_REQUEST_TIMEOUT": "180"}
+    p = subprocess.run(args, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=timeout, check=False, env=env)
+    result = {"args": cmd, "returncode": p.returncode, "stdout": redact_sensitive_text(p.stdout), "stderr": redact_sensitive_text(p.stderr)}
+    if check and p.returncode != 0:
+        raise RuntimeError("CLI failed: " + str(cmd) + "\n" + result["stderr"][-1400:])
+    return result
+
+
+def mount_drive_interactive(session: str, timeout: float = 300, run_id: str = "", timeline_path=None) -> dict:
+    """Run the official `colab drivemount` interactively and capture a
+    structured mount timeline (see h3_mount_timeline.py).
+
+    Stdout/stderr are piped and forwarded verbatim to the controller's own
+    stdout (so the 20s log monitor still sees the authorization link), with
+    each line stamped on arrival. Stdin stays inherited from the PTY: the
+    CLI's credential hook reads /dev/tty directly for the Enter keypress.
+    Chunked reads are used because the CLI prints "Press Enter..." with no
+    trailing newline — line iteration would delay that prompt.
+
+    Returns the timeline dict. Raises on any non-mounted outcome; the
+    timeline JSON is written before raising so the failure is diagnosable.
+    """
+    if not sys.stdin.isatty():
+        raise RuntimeError("Interactive terminal required for Drive authorization")
+    exe = resolve_colab_executable()
+    started_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    lines: list = []
+    lock = threading.Lock()
+    proc = subprocess.Popen(
+        [exe, '--auth=' + _COLAB_AUTH, 'drivemount', '-s', session],
+        stdin=None, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    )
+
+    def _reader():
+        buf = b""
+        try:
+            while True:
+                chunk = os.read(proc.stdout.fileno(), 4096)
+                if not chunk:
+                    break
+                with lock:
+                    sys.stdout.write(chunk.decode("utf-8", errors="replace"))
+                    sys.stdout.flush()
+                buf += chunk
+                while b"\n" in buf:
+                    raw, buf = buf.split(b"\n", 1)
+                    lines.append((datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                                  raw.decode("utf-8", errors="replace")))
+        except OSError:
+            pass
+        if buf:
+            lines.append((datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                          buf.decode("utf-8", errors="replace")))
+
+    reader = threading.Thread(target=_reader, daemon=True)
+    reader.start()
+    timed_out = False
+    try:
+        returncode = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        proc.kill()
+        returncode = proc.wait()
+    reader.join(timeout=10)
+    finished_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    timeline = build_mount_timeline(
+        session, run_id, lines, read_history_events(session), returncode,
+        started_at, finished_at, timed_out=timed_out,
+    )
+    target = Path(timeline_path) if timeline_path else RUNS / f"mount_timeline_{session}.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(timeline, ensure_ascii=False, indent=2))
+    record({"event": "mount_timeline", "session": session, "run_id": run_id,
+            "summary": summarize_timeline(timeline), "timeline_file": str(target)})
+    if timeline["outcome"] != "mounted":
+        raise RuntimeError("Official Colab Drive mount failed; halt and release GPU -- " + summarize_timeline(timeline))
+    return timeline
+
+
+def mount_drive(session: str, deadline_sec: int, run_id: str = "", timeline_path=None) -> dict:
+    # 2026-11-11: floor 720s = 600s remote mount timeout + 120s margin, so
+    # the controller never kills a mount that still has remote time left.
+    # The 900s cap is unchanged and is a LOCAL ceiling only; the remote fix
+    # is timeout_ms=600000 in the injected drivemount code, not this wait.
+    return mount_drive_interactive(session, timeout=min(900, max(720, deadline_sec // 3)),
+                                   run_id=run_id, timeline_path=timeline_path)
+
+
+def check_mount_signature(exec_result: dict) -> bool:
+    """Fail-closed check that the remote google.colab.drive.mount accepts
+    timeout_ms. Returns True when the probe printed a signature containing
+    it; raises when the probe produced no signature line at all."""
+    text = (exec_result or {}).get("stdout", "") + "\n" + (exec_result or {}).get("stderr", "")
+    for line in text.splitlines():
+        if "MOUNT_SIGNATURE:" in line:
+            return "timeout_ms" in line
+    raise RuntimeError("Mount signature probe produced no MOUNT_SIGNATURE line; cannot verify remote drive.mount timeout_ms")
+
+
+def persist_exec_result(run_dir, name: str, result: dict) -> Path:
+    """Persist a remote exec result (stdout/stderr/returncode) to the run
+    dir. 2026-11-11 lesson: run A failed at the final download and the
+    worker's own progress output had been discarded, so the failure stage
+    could not be identified after the session was stopped. Every exec
+    result is now kept on disk. Repeated calls with the same name (e.g.
+    probe retries) get _2, _3 suffixes instead of overwriting."""
+    run_dir = Path(run_dir)
+    base = run_dir / f"exec_{name}.json"
+    path = base
+    n = 2
+    while path.exists():
+        path = run_dir / f"exec_{name}_{n}.json"
+        n += 1
+    path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def download_remote_comfyui_log(session: str, run_dir: Path) -> str | None:
+    """Best-effort download of the remote ComfyUI server log after a worker
+    failure. The server logs its /prompt validation rejections there (the
+    400 body alone does not always name the node), and the runtime disk is
+    ephemeral — once the session stops, the log is gone. Returns the local
+    path, or None when the download fails (never raises)."""
+    local = run_dir / "comfyui_remote.log"
+    try:
+        run_cli(["download", "-s", session, REMOTE + "/comfyui.log", str(local)], timeout=180)
+        return str(local) if local.is_file() and local.stat().st_size > 0 else None
+    except Exception:
+        return None
+
+
+def check_worker_done_marker(exec_result: dict, variant: str) -> dict:
+    """Fail-closed check that the remote worker finished the variant: it
+    only prints MUSE_H3_DONE_JSON after assemble_video wrote the final
+    MP4. `colab exec` may return 0 even when the remote cell raised, so a
+    bare returncode is NOT proof the worker succeeded — the marker is.
+    Returns the parsed done-info dict. Raises with the tail of the worker
+    output so the failure stage stays diagnosable after the session stops."""
+    text = (exec_result or {}).get("stdout", "") or ""
+    for line in text.splitlines():
+        if line.startswith("MUSE_H3_DONE_JSON:"):
+            return json.loads(line.split("MUSE_H3_DONE_JSON:", 1)[1].strip())
+    tail = (text + "\n" + ((exec_result or {}).get("stderr", "") or ""))[-1500:]
+    raise RuntimeError(
+        f"Remote worker for variant {variant} did not print MUSE_H3_DONE_JSON; "
+        f"the output file was never produced. Worker output tail:\n{tail}")
+
+
+def check_remote_output(exec_result: dict, variant: str) -> dict:
+    """Fail-closed gate on the remote MP4 BEFORE any download: the remote
+    output-check script must report OUTPUT_CHECK_JSON with ok=true, the
+    file existing, and ffprobe reading exactly 274 frames at 24 fps and
+    1080x1920. The worker's MUSE_H3_DONE_JSON marker alone is a claim;
+    this is the independent remote evidence the file is real and
+    decodable. Raises with the check output tail otherwise."""
+    text = (exec_result or {}).get("stdout", "") or ""
+    for line in text.splitlines():
+        if line.startswith("OUTPUT_CHECK_JSON:"):
+            info = json.loads(line.split("OUTPUT_CHECK_JSON:", 1)[1].strip())
+            if info.get("ok") and info.get("exists") and info.get("frames") == 274 \
+                    and info.get("fps") == 24 and info.get("width") == 1080 and info.get("height") == 1920:
+                return info
+            raise RuntimeError(
+                f"Remote output check failed for variant {variant}: {json.dumps(info, ensure_ascii=False)[:800]}")
+    tail = (text + "\n" + ((exec_result or {}).get("stderr", "") or ""))[-1500:]
+    raise RuntimeError(
+        f"Remote output check for variant {variant} produced no OUTPUT_CHECK_JSON; "
+        f"the MP4 was not verified on the remote. Output tail:\n{tail}")
+
+
+def _strip_cli_notice(text: str) -> str:
+    """Drop the Colab CLI's intermittent update-check notice. It is printed
+    to stdout before the real output and contains 'available: 0.8.0'."""
+    return "\n".join(
+        line for line in (text or "").splitlines()
+        if "new version of Colab CLI" not in line
+        and "colab update" not in line
+        and "enable_update_check" not in line
+    )
+
+
+def inspect():
+    usage = run_cli(["usage"])
+    sessions = run_cli(["sessions"])
+    # 2026-11-11: the loose reference parser read the update notice
+    # ('available: 0.8.0') as a CU balance of 0.8, which falsely tripped
+    # the hard-stop gate and killed a healthy G4 run. Use the strict
+    # parser (exact 'Current balance:' line) and strip the notice first.
+    usage_text = _strip_cli_notice(usage["stdout"] + "\n" + usage["stderr"])
+    parsed = parse_usage_text(usage_text)
+    ses = parse_sessions_output(_strip_cli_notice(sessions["stdout"] + "\n" + sessions["stderr"]))
+    return {"cu_balance": parsed["balance"], "rate": parsed["rate"],
+            "sessions": [{"name": s.session_id, "gpu": s.gpu_type} for s in ses]}
+
+
+def validate_local(api, proof):
+    validate_poster(ROOT / "assets" / "original_poster.jpg")
+    manifest = json.loads(Path(proof).read_text())
+    validate_model_cache_manifest(manifest)
+    from h3_contract import patch_api_workflow
+
+    raw = json.loads(Path(api).read_text())
+    if "nodes" in raw:
+        raise ValueError("Expected ComfyUI API format, not UI-format workflow (nodes/links)")
+    for variant in ("A", "B"):
+        patched = patch_api_workflow(raw, variant)
+        node = patched["136"]["inputs"]
+        assert node["width"] == 736 and node["height"] == 1312 and node["length"] == 226
+        assert patched["124"]["inputs"]["steps"] == 25
+        assert patched["124"]["inputs"]["scheduler"] == "beta"
+        assert patched["146"]["inputs"]["value"] is False
+    return manifest
+
+
+def exec_script(sess, path, timeout, env=None):
+    cmd = ["exec", "-s", sess, "-f", str(path), "--timeout", "600"]
+    if env:
+        for k, v in env.items():
+            cmd += ["--env", f"{k}={v}"]
+    result = run_cli(cmd, timeout=timeout)
+    # Every remote exec's stdout/stderr/returncode is persisted to the
+    # current run dir (user requirement 2026-11-11 09:12). _EXEC_LOG_DIR is
+    # set by run_variant (and by the acceptance driver) before any exec.
+    if _EXEC_LOG_DIR is not None:
+        try:
+            persist_exec_result(_EXEC_LOG_DIR, Path(path).stem, result)
+        except Exception:
+            pass
+    return result
+
+
+# Run dir for exec-result persistence; set by run_variant / acceptance
+# driver, cleared in their finally blocks. None means "do not persist".
+_EXEC_LOG_DIR = None
+
+
+def ensure_no_foreign_sessions(pre):
+    if pre["sessions"]:
+        raise RuntimeError("Existing Colab sessions present; fail closed. Check remote sessions manually.")
+
+
+def initialize_project_budget(run_id: str, prior_unbilled_reserve_cu: float = PRIOR_TASK_UNBILLED_RESERVE_CU) -> dict:
+    live = read_live_usage(_COLAB_AUTH)
+    if live.get("balance") is None:
+        raise RuntimeError("Cannot parse CU balance; abort")
+    return load_or_create_budget_ledger(LEDGER_PATH, live["balance"], run_id,
+                                        prior_unbilled_reserve_cu=prior_unbilled_reserve_cu)
+
+
+def probe_actual_gpu(session: str, choice_key: str) -> dict:
+    """GPU probe with bounded retries for cold-start kernel timeouts.
+
+    The first exec after allocation can fail with a ReadTimeout while the
+    runtime kernel is still starting (2026-11-11: A100-HM allocated fine,
+    probe exec failed with read timeout=10). Retry the same session up to
+    3 times, 15s apart; any other error (wrong GPU, insufficient VRAM)
+    fails immediately and is never retried."""
+    last_error = None
+    for attempt in range(3):
+        try:
+            result = exec_script(session, ROOT / "h3_gpu_probe.py", timeout=180, env={"H3_GPU_CHOICE": choice_key})
+            return parse_gpu_probe_output(result["stdout"] + "\n" + result["stderr"], choice_key)
+        except Exception as e:  # noqa: BLE001
+            last_error = e
+            text = str(e)
+            if "ReadTimeout" in text or "Read timed out" in text or "TimeoutError" in text:
+                record({"event": "gpu_probe_timeout_retry", "session": session, "attempt": attempt + 1, "error": text[:300]})
+                time.sleep(15)
+                continue
+            raise
+    raise RuntimeError(f"GPU probe failed after 3 attempts: {last_error}")
+
+
+def validate_comfy_workflow(api_path: Path, variant: str) -> dict:
+    """Static + contract validation of the API workflow for one variant."""
+    raw = json.loads(Path(api_path).read_text())
+    if "nodes" in raw:
+        raise ValueError("Expected ComfyUI API format, not UI-format workflow (nodes/links)")
+    from h3_contract import patch_api_workflow
+
+    api = patch_api_workflow(raw, variant, "muse_original_poster.jpg", seed=42 if variant == "A" else 43)
+    node = api["136"]["inputs"]
+    assert node["width"] == 736 and node["height"] == 1312 and node["length"] == 226
+    assert node["ref_image_size"] == "match"
+    assert api["124"]["inputs"]["steps"] == 25 and api["124"]["inputs"]["scheduler"] == "beta"
+    assert api["146"]["inputs"]["value"] is False
+    return api
+
+
+def preflight(args) -> dict:
+    """Fully read-only. Never creates a GPU. Returns a checks dict; raises on failure."""
+    checks = {}
+
+    def check(name, fn):
+        try:
+            checks[name] = {"pass": True, "detail": fn()}
+        except Exception as e:  # noqa: BLE001 - preflight must record, not hide
+            checks[name] = {"pass": False, "detail": str(e)[:500]}
+
+    # 1. source files + existing tests (files exist; full unittest is run by the caller before preflight)
+    def _sources():
+        required = ["h3_controller.py", "h3_contract.py", "h3_remote_worker.py", "h3_gpu_probe.py",
+                    "h3_drive_probe.py", "h3_init_remote.py", "assemble.py", "build_api_candidate.py",
+                    "drive_depot.py", "drive_api.py", "drive_resumable.py", "auth_support.py",
+                    "workflow_api.json", "model_cache/verified_manifest.json", "h3_budget.py",
+                    "h3_session_watchdog.py", "h3_video_qa.py", "h3_mount_timeline.py",
+                    "h3_mount_signature_probe.py", "h3_comfyui_cache.py",
+                    "V3_DRIVEMOUNT_TIMEOUT_PATCH.md"]
+        missing = [f for f in required if not (ROOT / f).exists()]
+        if missing:
+            raise RuntimeError("Missing project files: " + ", ".join(missing))
+        return f"{len(required)} files present"
+
+    check("project_sources", _sources)
+
+    def _comfyui_cache():
+        # Informational only, never a gate: a missing cache means the
+        # worker falls back to git clone (atomic, bounded retry).
+        cache = _comfyui_cache_task()
+        if cache is None:
+            return "not built; worker falls back to git clone"
+        return ("ready: " + cache["archive"] + " sha256=" + cache["sha256"][:16]
+                + "... commit=" + cache["commit"][:12])
+
+    check("comfyui_source_cache", _comfyui_cache)
+    check("adc_valid", lambda: audit_user_adc_file())
+    # 2-4. same account + Drive READY (live)
+    def _drive_ready():
+        from drive_depot import drive_service, account_matches, verify_ready
+
+        drive = drive_service()
+        same = account_matches(drive, _COLAB_AUTH)
+        if not same:
+            raise RuntimeError("ACCOUNT_MISMATCH")
+        result = verify_ready(drive, same, Path(args.cache_manifest))
+        return result
+
+    check("same_account_and_drive_ready", _drive_ready)
+    check("poster_sha256", lambda: (validate_poster(ROOT / "assets" / "original_poster.jpg"), "sha256 ok")[1])
+    check("storyboard_drive_id", lambda: STORY_DRIVE_ID == "1TTv-xyLsSLSvTL1jy9ewOFM4qXUKBwpP" or (_ for _ in ()).throw(RuntimeError("Storyboard Drive ID mismatch")))
+
+    def _workflow():
+        validate_local(args.workflow_api, args.cache_manifest)
+        return "API workflow A/B patch ok, 736x1312, 226 frames, 25 steps, non-Turbo"
+
+    check("comfy_api_candidate_static", _workflow)
+    check("comfy_ref_pinned", lambda: args.comfy_ref == COMFY_REF_DEFAULT or (_ for _ in ()).throw(RuntimeError("ComfyUI ref is not the pinned commit")))
+
+    def _cli():
+        probe = run_cli(['drivemount','--help'], timeout=20, check=False)
+        if probe["returncode"] != 0:
+            raise RuntimeError("Official Colab drivemount unavailable")
+        ver = run_cli(["version"], timeout=20, check=False)
+        if "0.7.5" not in ver["stdout"] + ver["stderr"]:
+            raise RuntimeError("Colab CLI is not 0.7.5")
+        return "colab 0.7.5, drivemount --help ok"
+
+    check("cli_0_7_5_commands", _cli)
+
+    def _cli_post_patch():
+        if not cli_post_body_patch_present():
+            raise RuntimeError("Colab CLI POST-body patch missing: empty POSTs get 411 from the egress proxy; reinstall the patch before GPU")
+        return "colab_cli client.py sends data=b'{}' on POSTs (411 workaround, verified live)"
+
+    check("cli_post_body_patch", _cli_post_patch)
+
+    def _cli_drivemount_patch():
+        if not cli_drivemount_timeout_patch_present():
+            raise RuntimeError("Colab CLI drivemount timeout patch missing: remote drive.mount would use the 120s default; reinstall the patch before GPU")
+        return "colab_cli automation.py injects drive.mount(..., timeout_ms=600000), local ceiling 660s"
+
+    check("cli_drivemount_timeout_patch", _cli_drivemount_patch)
+
+    def _pty():
+        # sys.executable, not bare `python`: the check must pass in any launch
+        # environment (the exec sandbox has python3 but no `python` alias).
+        p = subprocess.run(
+            ["script", "-qec", f'{sys.executable} -c "import os,sys; assert sys.stdin.isatty(); fd=os.open(\\"/dev/tty\\",os.O_RDONLY); os.close(fd); print(\\"TTY_OK\\")"',
+             "/dev/null"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if "TTY_OK" not in p.stdout + p.stderr:
+            raise RuntimeError("PTY capability failed")
+        return "script PTY + /dev/tty ok"
+
+    check("pty_capability", _pty)
+
+    def _budget():
+        live = read_live_usage(_COLAB_AUTH)
+        if LEDGER_PATH.exists():
+            ledger = json.loads(LEDGER_PATH.read_text())
+            reconcile_budget(ledger, live["balance"], LEDGER_PATH)
+            return {"production_task_id": ledger.get("production_task_id"),
+                    "initial_balance_cu": ledger["initial_balance_cu"], "hard_stop_balance_cu": ledger["hard_stop_balance_cu"],
+                    "prior_task_unbilled_reserve_cu": ledger.get("prior_task_unbilled_reserve_cu", 0.0),
+                    "effective_hard_stop_balance_cu": effective_hard_stop_cu(ledger),
+                    "max_observed_spent_cu": ledger["max_observed_spent_cu"], "live_balance_cu": live["balance"]}
+        return {"production_task_id": PRODUCTION_TASK_ID,
+                "initial_balance_cu": live["balance"], "hard_stop_balance_cu": live["balance"] - PROJECT_BUDGET_CU,
+                "live_balance_cu": live["balance"], "ledger": "not yet created; will be created before first GPU"}
+
+    check("budget_ledger_task", _budget)
+
+    def _restore_capacity():
+        # Local planning estimate only: the real gate runs remotely in the
+        # worker (shutil.disk_usage + measured throughput on the first 256MB).
+        # No Drive->VM copy throughput has ever been measured (the mount
+        # never succeeded), so the 50-150 MB/s range is an assumption,
+        # labelled as such — the remote worker replaces it with a measurement.
+        manifest = json.loads(Path(args.cache_manifest).read_text())
+        total = sum(int(f["size"]) for f in manifest["files"])
+        reserve = 5 * 1024 ** 3
+        lo_s = round(total / (150 * 1_000_000))
+        hi_s = round(total / (50 * 1_000_000))
+        return {"total_bytes": total, "required_free_bytes": total + reserve,
+                "eta_sec_at_50_150_mbps": [hi_s, lo_s],
+                "eta_cost_cu_at_50_150_mbps_10cu_h": [round(hi_s / 3600 * 10.05, 2), round(lo_s / 3600 * 10.05, 2)],
+                "note": "assumed throughput range, unmeasured; remote worker measures it"}
+
+    check("restore_capacity_estimate", _restore_capacity)
+
+    def _sessions():
+        pre = inspect()
+        if pre["sessions"]:
+            raise RuntimeError(f"Active sessions present: {pre['sessions']}")
+        if pre["cu_balance"] is None:
+            raise RuntimeError("Cannot parse CU balance")
+        return {"cu_balance": pre["cu_balance"], "rate": pre["rate"], "sessions": []}
+
+    check("no_active_sessions", _sessions)
+
+    def _policy():
+        if args.gpu_policy != "G4_THEN_A100_HIGHMEM":
+            raise RuntimeError("gpu-policy must be G4_THEN_A100_HIGHMEM")
+        if float(args.project_budget_cu) != PROJECT_BUDGET_CU:
+            raise RuntimeError(f"project-budget-cu must be {PROJECT_BUDGET_CU:.0f}")
+        if float(args.per_session_budget_cu) != PER_SESSION_BUDGET_CU:
+            raise RuntimeError(f"per-session-budget-cu must be {PER_SESSION_BUDGET_CU:.0f}")
+        return f"G4_THEN_A100_HIGHMEM, {PROJECT_BUDGET_CU:.0f} CU project, {PER_SESSION_BUDGET_CU:.0f} CU per session"
+
+    check("gpu_policy_and_budget", _policy)
+
+    failed = [k for k, v in checks.items() if not v["pass"]]
+    result = {"run_id": args.run_id, "checks": checks, "passed": not failed, "failed": failed}
+    if failed:
+        raise RuntimeError("Preflight failed: " + ", ".join(failed) + " -- " + json.dumps(checks, ensure_ascii=False)[:2000])
+    return result
+
+
+def cli_drivemount_timeout_patch_present() -> bool:
+    """Fail-closed check for the 2026-11-11 drivemount timeout patch in the
+    vendored Colab CLI: automation.py must inject timeout_ms=600000 into the
+    remote drive.mount() call, and the local automation ceiling must be 660s
+    so the local execute deadline never cuts the remote 600s mount short.
+    If the venv is rebuilt, this check fails before any GPU is requested."""
+    import site
+
+    for base in site.getsitepackages():
+        candidate = Path(base) / "colab_cli" / "commands" / "automation.py"
+        if candidate.exists():
+            text = candidate.read_text(encoding="utf-8", errors="ignore")
+            return "timeout_ms=600000" in text and "INTERACTIVE_AUTOMATION_TIMEOUT_SEC = 660" in text
+    return False
+
+
+def cli_post_body_patch_present() -> bool:
+    """Fail-closed check for the 2026-11-11 VM transport workaround in the
+    vendored Colab CLI: _issue_request must send a non-empty body on POSTs,
+    otherwise the egress proxy strips Content-Length: 0 and Google returns
+    411 for /tun/m/assign and /tun/m/unassign. If the venv is rebuilt, this
+    check fails before any GPU is requested."""
+    import site
+
+    for base in site.getsitepackages():
+        candidate = Path(base) / "colab_cli" / "client.py"
+        if candidate.exists():
+            text = candidate.read_text(encoding="utf-8", errors="ignore")
+            return 'kwargs["data"] = b"{}"' in text and 'if method == "POST"' in text
+    return False
+
+
+def allocate_managed_session(gpu_choice: dict, run_id: str) -> str:
+    return "muse-h3-" + uuid.uuid4().hex[:10]
+
+
+def download_and_validate_variant(session: str, variant: str, run_id: str) -> dict:
+    from h3_video_qa import validate_final_video
+
+    out_dir = OUTPUT_ROOT / run_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # Remote worker writes output/shao_nian_h3_<variant>.mp4 (already assembled 274f)
+    target = out_dir / f"{variant}.mp4"
+    run_cli(["download", "-s", session, REMOTE + f"/output/shao_nian_h3_{variant}.mp4", str(target)], timeout=600)
+    info = validate_final_video(target)
+    # Also download the worker metadata json if present.
+    meta_target = out_dir / f"{variant}.json"
+    try:
+        run_cli(["download", "-s", session, REMOTE + f"/output/{variant}.json", str(meta_target)], timeout=120)
+    except Exception:
+        pass
+    return info
+
+
+def check_archive_metadata(meta: dict, expected_parent: str) -> bool:
+    """Drive output parent verification: file must exist, not be trashed,
+    and its parents must be exactly the RUN_ID output folder."""
+    if not meta or meta.get("trashed"):
+        return False
+    return expected_parent in (meta.get("parents") or [])
+
+
+def archive_variant_to_drive(variant: str, run_id: str, qa_files: list | None = None) -> dict:
+    """Upload MP4 (+ QA files) to Muse-H3-Video-Outputs/<RUN_ID>/ and
+    re-query each file's server metadata. Returns Drive ids."""
+    from drive_depot import drive_service, ensure_folder, upload_one, get_file_evidence
+    from drive_api import file_digests
+    from h3_contract import sha256_file
+
+    service = drive_service()
+    out_root = ensure_folder(service, None, "Muse-H3-Video-Outputs", allow_write=True)
+    run_folder = ensure_folder(service, out_root, run_id, allow_write=True)
+    uploaded = {}
+    files = [(OUTPUT_ROOT / run_id / f"{variant}.mp4", f"{variant}.mp4")]
+    for extra in (qa_files or []):
+        files.append((Path(extra), Path(extra).name))
+    for local_path, name in files:
+        local_path = Path(local_path)
+        if not local_path.is_file():
+            raise RuntimeError(f"Archive file missing: {local_path}")
+        sha = sha256_file(local_path)
+        entry = upload_one(service, local_path, run_folder, name, name, sha, "54472221d27c695fca9621b0c3ed52f06c4af707")
+        meta = get_file_evidence(service, entry["drive_file_id"])
+        if not check_archive_metadata(meta, run_folder):
+            raise RuntimeError(f"Drive archive parent/trash check failed for {name}")
+        uploaded[name] = {"drive_file_id": entry["drive_file_id"], "size": entry["size"],
+                          "server_md5": entry["server_md5"], "sha256": sha, "parent": run_folder}
+    return {"output_folder_id": run_folder, "files": uploaded}
+
+
+def stop_and_verify_session(session: str) -> dict:
+    stop_ok = False
+    for attempt in range(3):
+        try:
+            live_before = inspect()
+            if not any(s["name"] == session for s in live_before["sessions"]):
+                stop_ok = True
+                break
+            run_cli(["stop", "-s", session], timeout=65)
+            live = inspect()
+            if not any(s["name"] == session for s in live["sessions"]):
+                stop_ok = True
+                record({"event": "stopped", "session": session, "balance": live["cu_balance"], "rate": live["rate"]})
+                break
+        except Exception as e:  # noqa: BLE001
+            record({"event": "stop_error", "session": session, "attempt": attempt + 1, "error": str(e)[-250:]})
+        time.sleep(3)
+    if not stop_ok:
+        record({"event": "CRITICAL_ORPHAN_RISK", "session": session})
+    return {"session": session, "stopped_confirmed": stop_ok}
+
+
+def reconcile_run_state(run_id: str) -> dict:
+    from h3_session_watchdog import reconcile_on_startup
+
+    ledger = None
+    if LEDGER_PATH.exists():
+        ledger = json.loads(LEDGER_PATH.read_text())
+        try:
+            live = read_live_usage(_COLAB_AUTH)
+            reconcile_budget(ledger, live["balance"], LEDGER_PATH)
+        except Exception as e:  # noqa: BLE001
+            ledger = {**ledger, "reconcile_error": str(e)[:300]}
+    return {"run_id": run_id, "ledger": ledger, "watchdog": reconcile_on_startup(_COLAB_AUTH)}
+
+
+def run_variant(args) -> dict:
+    global _EXEC_LOG_DIR
+    variant = args.variant
+    if variant not in ("A", "B"):
+        raise ValueError("variant must be A or B")
+    if not all((args.execute, args.confirm_gpu, args.authorize_task_gpu, args.allow_g4, args.allow_a100_highmem)):
+        raise RuntimeError("GPU blocked: require --execute --confirm-gpu --authorize-task-gpu --allow-g4 --allow-a100-highmem")
+    if float(args.project_budget_cu) != PROJECT_BUDGET_CU or float(args.per_session_budget_cu) != PER_SESSION_BUDGET_CU:
+        raise RuntimeError(f"Project budget must be {PROJECT_BUDGET_CU:.0f} CU, per-session {PER_SESSION_BUDGET_CU:.0f} CU")
+    if args.gpu_policy != "G4_THEN_A100_HIGHMEM":
+        raise RuntimeError("gpu-policy must be G4_THEN_A100_HIGHMEM")
+    if not args.comfy_ref or len(args.comfy_ref) < 7:
+        raise RuntimeError("Pin ComfyUI commit hash or tag")
+    if not args.drive_cache_dir.startswith("/content/drive/"):
+        raise RuntimeError("Expected explicitly mounted Drive cache path under /content/drive")
+    if not args.approve_interactive_drive_mount:
+        raise RuntimeError("G4 blocked: --approve-interactive-drive-mount required")
+    if not args.fresh_inference:
+        raise RuntimeError("--fresh-inference required for a from-zero production run")
+    validate_local(args.workflow_api, args.cache_manifest)
+    validate_comfy_workflow(args.workflow_api, variant)
+    # Live Drive READY + same account, before any paid GPU.
+    from drive_depot import drive_service, account_matches, verify_ready
+
+    drive = drive_service()
+    same_account = account_matches(drive, _COLAB_AUTH)
+    if not same_account:
+        raise RuntimeError("ACCOUNT_MISMATCH")
+    verify_ready(drive, same_account, Path(args.cache_manifest))
+    ledger = initialize_project_budget(args.run_id,
+                                       prior_unbilled_reserve_cu=getattr(args, "prior_unbilled_reserve_cu",
+                                                                         PRIOR_TASK_UNBILLED_RESERVE_CU))
+    pre = inspect()
+    if pre["cu_balance"] is None:
+        raise RuntimeError("Cannot parse CU balance; abort")
+    ensure_no_foreign_sessions(pre)
+    # Watchdog reconciliation: any managed session still active blocks a new allocation.
+    from h3_session_watchdog import reconcile_on_startup
+
+    rec = reconcile_on_startup(_COLAB_AUTH)
+    if rec.get("managed_active_sessions"):
+        raise RuntimeError(f"Managed GPU sessions still active: {rec['managed_active_sessions']}; stop them first")
+    probe = run_cli(['drivemount','--help'], timeout=20, check=False)
+    if probe["returncode"] != 0:
+        raise RuntimeError("Official Colab drivemount unavailable")
+    if not sys.stdin.isatty():
+        raise RuntimeError("Official drivemount requires interactive terminal; no TTY, abort BEFORE GPU allocation")
+
+    run_dir = RUNS / args.run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    # From here on, every remote exec result is persisted to this run dir.
+    _EXEC_LOG_DIR = run_dir
+    out_dir = OUTPUT_ROOT / args.run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    session = None
+    created = False
+    allocation_attempted = False
+    stop_ok = False
+    gpu_info = None
+    chosen_key = None
+    attempts = []
+    start = time.monotonic()
+    session_spent_start = float(ledger.get("max_observed_spent_cu", 0.0))
+    try:
+        # Allocation loop: G4, G4 retry, A100_HIGH_MEM (only on capacity failure).
+        # Transport errors retry the same G4 once and never trigger A100 fallback.
+        # Empty POSTs carry data=b'{}' via the vendored CLI patch (see
+        # cli_post_body_patch_present / V3_CLI_PROXY_PATCH.md); without it
+        # the egress proxy strips Content-Length: 0 and Google returns 411.
+        for attempt in range(3):
+            choice = choose_gpu_candidate(attempt)
+            chosen_key = choice["key"]
+            session = allocate_managed_session(choice, args.run_id)
+            allocation_attempted = True
+            record({"event": "allocation_attempt", "session": session, "gpu": chosen_key, "variant": variant, "run_id": args.run_id})
+            try:
+                cmd = allocation_command(session, chosen_key, allow_g4=args.allow_g4, allow_a100_highmem=args.allow_a100_highmem)
+                # 420s: with the POST-body patch a G4 503 is retried inside
+                # the CLI (up to 3 retries, 30s each + 10/20/40s backoff).
+                run_cli(cmd, timeout=420)
+            except Exception as e:
+                attempts.append({"session": session, "gpu": chosen_key, "status": "allocation_failed", "error": str(e)[:500]})
+                # Reconcile late allocation before deciding on fallback.
+                time.sleep(5)
+                try:
+                    live_sessions = inspect()["sessions"]
+                    if any(s["name"] == session for s in live_sessions):
+                        raise RuntimeError(f"Late allocation appeared for {session} after a failed `new`; stop it and abort")
+                except RuntimeError:
+                    raise
+                except Exception:
+                    pass
+                if is_capacity_failure(str(e)) and attempt < 2:
+                    continue
+                # Transport errors retry the SAME GPU once (attempt 0 -> 1,
+                # both G4). They never justify falling back to A100.
+                if is_transient_transport_error(str(e)) and chosen_key == "G4" and attempt == 0:
+                    record({"event": "allocation_transport_retry", "session": session, "gpu": chosen_key, "error": str(e)[:300]})
+                    continue
+                raise RuntimeError(f"GPU allocation failed ({chosen_key}): {str(e)[:500]}; no fallback unless capacity failure")
+            created = True
+            record({"event": "allocated", "session": session, "gpu": chosen_key})
+            break
+        if not created or session is None:
+            raise RuntimeError("GPU allocation did not complete")
+        # Watchdog record + background watcher. The initial deadline is
+        # derived from the 25 CU per-session cap minus the cleanup reserve
+        # at the chosen GPU's maximum allowed rate (no fixed 3600 s cutoff
+        # anymore); after the GPU probe the deadline is replaced with the
+        # budget-derived value from allowed_runtime_seconds() using the
+        # actual live rate.
+        initial_sec = initial_session_wall_seconds(GPU_CHOICES[chosen_key]["max_rate_cu_h"])
+        deadline = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=initial_sec)
+        from h3_session_watchdog import record_session
+
+        session_rec = record_session(session, chosen_key, args.run_id, deadline.isoformat())
+        watchdog_proc = None
+        try:
+            watchdog_proc = subprocess.Popen(
+                [sys.executable, str(ROOT / "h3_session_watchdog.py"), "watch", "--session", session,
+                 "--production-task-id", getattr(args, "production_task_id", PRODUCTION_TASK_ID)],
+                stdout=open(run_dir / f"watchdog_{variant}.log", "a"),
+                stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            record({"event": "watchdog_start_failed", "session": session, "error": str(e)[:300]})
+        try:
+            # GPU hardware probe before any expensive work.
+            gpu_info = probe_actual_gpu(session, chosen_key)
+            record({"event": "gpu_probed", "session": session, **gpu_info})
+            live = inspect()
+            if live["rate"] is None or live["rate"] <= 0 or live["rate"] > args.max_rate_cu_h:
+                raise RuntimeError("Unknown/excessive live CU/hr rate")
+            # Reconcile ledger with the live balance after allocation.
+            ledger = reconcile_budget(ledger, live["cu_balance"], LEDGER_PATH)
+            # Unbilled-session estimate: the posted balance lags the real
+            # burn, so gate on the effective balance too (item 7). At this
+            # point only ~1-2 min have elapsed, so the estimate is small;
+            # the watchdog applies the same estimate on every poll.
+            unbilled = estimate_unbilled_cu(session_rec.get("started_at_utc"), live["rate"])
+            record({"event": "unbilled_estimate", "session": session, "unbilled_cu": unbilled,
+                    "rate_cu_h": live["rate"], "posted_balance_cu": live["cu_balance"]})
+            budget_sec = allowed_runtime_seconds(live["rate"], live["cu_balance"], ledger,
+                                                 session_spent_cu=unbilled, unbilled_cu=unbilled)
+            budget_sec = min(budget_sec, args.max_wall_sec)
+            if budget_sec < 300:
+                raise RuntimeError("Budget cannot cover minimal task + cleanup reserve")
+            # Replace the conservative initial watchdog deadline with the
+            # budget-derived wall time at the actual live rate.
+            from h3_session_watchdog import update_session_deadline
+
+            new_deadline = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=budget_sec)
+            update_session_deadline(session, new_deadline.isoformat())
+            record({"event": "watchdog_deadline_updated", "session": session,
+                    "budget_sec": budget_sec, "rate_cu_h": live["rate"],
+                    "deadline_utc": new_deadline.isoformat()})
+            # Remote signature probe: verify drive.mount accepts timeout_ms
+            # before spending the mount window on a patched call the remote
+            # runtime would reject with TypeError.
+            sig = exec_script(session, ROOT / "h3_mount_signature_probe.py", timeout=120)
+            if not check_mount_signature(sig):
+                raise RuntimeError("Remote drive.mount does not accept timeout_ms; abort before drivemount")
+            # Official interactive Drive mount (patched remote timeout 600s).
+            mount_drive(session, deadline_sec=budget_sec, run_id=args.run_id,
+                        timeline_path=run_dir / "mount_timeline.json")
+            exec_script(session, ROOT / "h3_init_remote.py", timeout=60)
+            # Upload poster, contract, assemble, manifest, workflow, submitted workflow.
+            api = validate_comfy_workflow(args.workflow_api, variant)
+            submitted_path = run_dir / f"workflow_{variant}_submitted.json"
+            submitted_path.write_text(json.dumps(api, ensure_ascii=False, indent=2))
+            for source, target in [
+                (ROOT / "assets" / "original_poster.jpg", REMOTE + "/poster.jpg"),
+                (ROOT / "h3_contract.py", REMOTE + "/h3_contract.py"),
+                (ROOT / "assemble.py", REMOTE + "/assemble.py"),
+                (Path(args.cache_manifest), REMOTE + "/model_manifest.json"),
+                (Path(args.workflow_api), REMOTE + "/workflow_api.json"),
+                (submitted_path, REMOTE + "/workflow_submitted.json"),
+            ]:
+                run_cli(["upload", "-s", session, str(source), target], timeout=300)
+            mount_cfg = RUNS / f"mount_{session}.json"
+            mount_cfg.write_text(json.dumps({"drive_cache_dir": args.drive_cache_dir}))
+            run_cli(["upload", "-s", session, str(mount_cfg), REMOTE + "/drive_mount_config.json"], timeout=120)
+            mount_probe = exec_script(session, ROOT / "h3_drive_probe.py", timeout=180)
+            persist_exec_result(run_dir, f"drive_probe_{variant}", mount_probe)
+            if "MUSE_DRIVE_MOUNT_MODELS_VISIBLE 4" not in mount_probe["stdout"]:
+                raise RuntimeError("Mounted Drive model cache not visible; release GPU")
+            # Single-variant remote worker.
+            elapsed = time.monotonic() - start
+            if elapsed > budget_sec:
+                raise TimeoutError("Budget wall time reached before " + variant)
+            task = {"variant": variant, "drive_cache_dir": args.drive_cache_dir, "comfy_ref": args.comfy_ref,
+                    "inference_timeout_sec": min(1800, max(100, int(budget_sec - elapsed - 120))),
+                    "rate_cu_h": live["rate"],
+                    "session_budget_cu": round(budget_sec * float(live["rate"]) / 3600.0, 3),
+                    "comfyui_cache": _comfyui_cache_task()}
+            task_path = RUNS / f"task_{session}.json"
+            task_path.write_text(json.dumps(task))
+            run_cli(["upload", "-s", session, str(task_path), REMOTE + "/task.json"], timeout=120)
+            worker_result = exec_script(session, ROOT / "h3_remote_worker.py", timeout=max(120, int(budget_sec - elapsed)))
+            persist_exec_result(run_dir, f"worker_{variant}", worker_result)
+            # Fail closed on the worker's own success marker: `colab exec`
+            # can return 0 even when the remote cell raised, so the
+            # download below must never run on a bare returncode.
+            try:
+                done_info = check_worker_done_marker(worker_result, variant)
+            except Exception:
+                # Pull the server log before the session stops: it holds
+                # the /prompt rejection detail the worker output may lack.
+                download_remote_comfyui_log(session, run_dir)
+                raise
+            record({"event": "worker_done", "variant": variant, "session": session, "done": done_info})
+            # Independent remote verification of the real MP4 BEFORE any
+            # download: the file must exist and ffprobe must read exactly
+            # 274 frames at 24 fps, 1080x1920. Only then is the download
+            # allowed; the local ffprobe validation after download is a
+            # second, independent check before any success report.
+            output_check = exec_script(session, ROOT / "h3_output_check.py", timeout=180,
+                                       env={"H3_VARIANT": variant})
+            checked = check_remote_output(output_check, variant)
+            record({"event": "remote_output_checked", "variant": variant, "session": session, "checked": checked})
+            # Download the submitted workflow the worker validated, for audit.
+            try:
+                run_cli(["download", "-s", session, REMOTE + "/workflow_submitted.json", str(run_dir / f"workflow_{variant}_submitted_remote.json")], timeout=120)
+            except Exception:
+                pass
+            info = download_and_validate_variant(session, variant, args.run_id)
+            record({"event": "version_downloaded", "variant": variant, "session": session, "sha256": info["sha256"], "frames": info["frame_count"]})
+            live = inspect()
+            ledger = reconcile_budget(ledger, live["cu_balance"], LEDGER_PATH)
+            return {
+                "variant": variant, "run_id": args.run_id, "session": session, "gpu": gpu_info,
+                "attempts": attempts, "video": info, "ledger": {k: v for k, v in ledger.items() if not k.startswith("_")},
+                "live_balance_cu": live["cu_balance"], "live_rate_cu_h": live["rate"],
+            }
+        finally:
+            if watchdog_proc is not None:
+                try:
+                    watchdog_proc.terminate()
+                except Exception:
+                    pass
+            _EXEC_LOG_DIR = None
+    finally:
+        if allocation_attempted and session is not None:
+            result = stop_and_verify_session(session)
+            stop_ok = result["stopped_confirmed"]
+            from h3_session_watchdog import mark_session_stopped
+
+            try:
+                mark_session_stopped(session)
+            except Exception:
+                pass
+            record({"event": "finished", "session": session, "variant": variant, "stop_verified": stop_ok,
+                    "allocation_attempted": allocation_attempted, "elapsed_sec": round(time.monotonic() - start, 1)})
+    if allocation_attempted and not created:
+        raise RuntimeError("GPU allocation did not complete; repeated session checks found no allocation, but delayed assignment remains possible. Recheck sessions later.")
+    if not stop_ok:
+        raise RuntimeError("Stop not verified; run FAILED regardless of generated files")
+    raise RuntimeError("run_variant reached unreachable state")
+
+
+def test_or_run(args):
+    if args.action == "check":
+        print(json.dumps(inspect(), ensure_ascii=False, indent=2))
+        return
+    if args.action == "plan":
+        print(json.dumps({"goal": "A/B R2V", "gpu": "G4_THEN_A100_HIGHMEM", "poster_sha256": POSTER_SHA256,
+                          "video_frames_per_variant": 274, "output": "1080x1920, 24fps",
+                          "historic_remaining_cu": HIST_REMAIN, "historic_stop_balance": HARD_STOP,
+                          "project_budget_cu": PROJECT_BUDGET_CU, "per_session_budget_cu": PER_SESSION_BUDGET_CU,
+                          "no_gpu_created": True, "workflows": "Require API-format official R2V workflow and four-file server-verified manifest"}, ensure_ascii=False, indent=2))
+        return
+    if args.action == "preflight":
+        result = preflight(args)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    if args.action != "run":
+        raise ValueError("Unknown action")
+    result = run_variant(args)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def main():
+    global _COLAB_AUTH, PRODUCTION_TASK_ID, LEDGER_PATH, PRIOR_TASK_UNBILLED_RESERVE_CU
+    parser = argparse.ArgumentParser()
+    parser.add_argument("action", choices=["plan", "check", "run", "preflight"])
+    parser.add_argument("--colab-auth", choices=("oauth2", "adc"), default="adc")
+    parser.add_argument("--workflow-api", default=str(ROOT / "workflow_api.json"))
+    parser.add_argument("--cache-manifest", default=str(ROOT / "model_cache" / "verified_manifest.json"))
+    parser.add_argument("--drive-cache-dir", default="/content/drive/MyDrive/Muse-H3-Model-Depot")
+    parser.add_argument("--comfy-ref", default=COMFY_REF_DEFAULT)
+    parser.add_argument("--budget-cu", type=float, default=0.0)
+    parser.add_argument("--project-budget-cu", type=float, default=PROJECT_BUDGET_CU)
+    parser.add_argument("--per-session-budget-cu", type=float, default=PER_SESSION_BUDGET_CU)
+    parser.add_argument("--production-task-id", default=DEFAULT_PRODUCTION_TASK_ID)
+    parser.add_argument("--prior-unbilled-reserve-cu", type=float, default=PRIOR_TASK_UNBILLED_RESERVE_CU)
+    parser.add_argument("--gpu-policy", default="G4_THEN_A100_HIGHMEM")
+    parser.add_argument("--variant", choices=("A", "B"), default=None)
+    parser.add_argument("--run-id", default="")
+    parser.add_argument("--max-rate-cu-h", type=float, default=14.0)
+    parser.add_argument("--max-wall-sec", type=int, default=MAX_SESSION_SECONDS)
+    parser.add_argument("--approve-interactive-drive-mount", action="store_true")
+    parser.add_argument("--fresh-inference", action="store_true")
+    for flag in ("execute", "confirm-gpu", "authorize-task-gpu", "allow-g4", "allow-a100-highmem"):
+        parser.add_argument("--" + flag, action="store_true")
+    a = parser.parse_args()
+    _COLAB_AUTH = a.colab_auth
+    PRODUCTION_TASK_ID = a.production_task_id
+    LEDGER_PATH = ledger_path_for_task(ROOT, PRODUCTION_TASK_ID)
+    PRIOR_TASK_UNBILLED_RESERVE_CU = float(a.prior_unbilled_reserve_cu)
+    if a.action == "run" and not a.variant:
+        parser.error("--variant A|B is required for run")
+    if a.action == "run" and not a.run_id:
+        parser.error("--run-id is required for run")
+    if a.action == "preflight" and not a.run_id:
+        a.run_id = create_run_id()
+    try:
+        test_or_run(a)
+    except Exception as e:
+        # Record the failure in the run dir so the stage and the error
+        # survive the process exit (the GPU is stopped by run_variant's
+        # finally block, not here).
+        if getattr(a, "run_id", ""):
+            try:
+                import traceback
+
+                (RUNS / a.run_id).mkdir(parents=True, exist_ok=True)
+                (RUNS / a.run_id / "failure.json").write_text(
+                    json.dumps({"action": a.action, "run_id": a.run_id,
+                                "production_task_id": getattr(a, "production_task_id", PRODUCTION_TASK_ID),
+                                "error_type": type(e).__name__, "error": str(e)[:2000],
+                                "traceback": traceback.format_exc()[-4000:]},
+                               ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+        print("ERROR:", str(e), file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

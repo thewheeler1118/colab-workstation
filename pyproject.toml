@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "colab-workstation"
+version = "0.1.0"
+description = "Versioned Colab AI production workstation with audited workflows, code, tests and runbooks"
+requires-python = ">=3.11"
+dependencies = [
+    "google-colab-cli>=0.7.5",
+    "google-auth>=2.30,<3",
+    "google-api-python-client>=2.100,<3",
+    "huggingface-hub>=0.34,<2",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = []
+
+[tool.pytest]
+testpaths = ["tests"]
+
+[tool.unittest]
+# Tests are run with the standard library runner from the repo root:
+#   python -m unittest discover -s tests -q
+# tests/run_ci_tests.py is the CI entry point: it runs the same discovery
+# but skips the two asset-gated poster tests (see its header) because the
+# original poster binary is intentionally excluded from this repo.

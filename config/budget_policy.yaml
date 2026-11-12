@@ -1,0 +1,20 @@
+# Budget policy — per-task independent 30 CU.
+# Values copied from h3_budget.py and verified by tests/test_config_contract.py.
+# User-corrected rule (2026-11-11 09:12): EVERY user-initiated production task
+# gets its own independent 30.00 CU budget. Budgets are NEVER summed across
+# tasks and 30 CU is NEVER an "additional" top-up on a previous task.
+project_budget_cu: 30.0
+per_session_budget_cu: 25.0
+cleanup_reserve_cu: 0.75
+max_session_seconds: 14400
+default_production_task_id: h3-ab-20261111
+prior_task_unbilled_reserve_cu: 0.14
+default_max_rate_cu_h: 14.0
+# The ledger is baselined on the LIVE `colab usage` balance at task start:
+#   hard_stop_balance_cu = live_balance_cu - 30.0 (+ prior unbilled reserve)
+# The controller hard-stops the session before the balance can fall below
+# the effective hard stop. --budget-cu is a SOFTWARE limit, not a Google
+# billing hard cap; live usage is always the authority.
+# Historical (superseded, do NOT reuse): the 2026-11-11 08:25 reading of a
+# cumulative 60 CU / 57.50 CU remaining was corrected by the user at 09:12
+# and the old ledger was archived read-only. See docs/decisions/ADR-001.md.

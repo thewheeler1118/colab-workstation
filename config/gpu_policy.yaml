@@ -1,0 +1,27 @@
+# GPU allocation policy.
+# Values copied from h3_budget.py GPU_CHOICES / GPU_ATTEMPT_PLAN and verified
+# by tests/test_config_contract.py. The controller enforces
+# --gpu-policy G4_THEN_A100_HIGHMEM and refuses any other value.
+attempt_plan:
+  - G4
+  - G4
+  - A100_HIGH_MEM
+max_attempts: 3
+choices:
+  G4:
+    command: ["new", "-s", "{session}", "--gpu", "G4"]
+    min_vram_mib: 92160
+    name_tokens: ["RTX PRO 6000", "BLACKWELL"]
+    max_rate_cu_h: 14.0
+  A100_HIGH_MEM:
+    command: ["new", "-s", "{session}", "--gpu", "A100", "--high-mem"]
+    min_vram_mib: 76800
+    name_tokens: ["A100"]
+    max_rate_cu_h: 14.0
+# Notes (from h3_budget.py):
+# - G4 gets at most 2 allocation attempts (attempt 0, retry 1), then A100
+#   High-Mem once. Attempt >= 3 raises "GPU allocation attempts exhausted".
+# - A100 40GB (non High-Mem) must never be allocated: min_vram_mib 76800
+#   rejects it (80GB High-Mem is the only A100 shape allowed).
+# - max_rate_cu_h is a planning ceiling (14.0 CU/h); the live rate is read
+#   from `colab usage` at run time.

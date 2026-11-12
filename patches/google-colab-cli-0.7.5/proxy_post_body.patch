@@ -1,0 +1,18 @@
+--- a/colab_cli/client.py
++++ b/colab_cli/client.py
+@@ -223,6 +223,15 @@
+             if timeout:
+                 kwargs["timeout"] = float(timeout)
+ 
++        # VM transport workaround (2026-11-11, verified live): this VM's
++        # egress proxy strips Content-Length: 0 from empty POSTs, and
++        # Google's frontend then returns 411 Length Required for
++        # /tun/m/assign and /tun/m/unassign. Sending a 2-byte body gives
++        # Content-Length: 2, which the proxy preserves; the Colab backend
++        # ignores the body (verified live: assign 200, unassign 204).
++        if method == "POST" and "data" not in kwargs and "json" not in kwargs:
++            kwargs["data"] = b"{}"
++
+         self.logger.debug(f"Request: {method} {endpoint}")
+         self.logger.debug(f"Params: {params}")
+ 

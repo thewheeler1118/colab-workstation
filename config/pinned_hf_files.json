@@ -1,0 +1,250 @@
+{
+  "files": {
+    "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors": {
+      "lfs": true,
+      "sha256": "9255f52b6677845ad238f20dfaafa94727053694127ab7f255c048f0f9365779",
+      "size": 20970379616
+    },
+    "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors": {
+      "lfs": true,
+      "sha256": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6",
+      "size": 15687142551
+    },
+    "vae/minimax_h3_audio_vae_fp32.safetensors": {
+      "lfs": true,
+      "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
+      "size": 605254808
+    },
+    "vae/minimax_h3_video_vae_int8_convrot.safetensors": {
+      "lfs": true,
+      "sha256": "52a2c8c73583c86e4f41cdcce3a6ad0ea562987bc0bf3d60a0cef5f5c8e60c0e",
+      "size": 2811065184
+    }
+  },
+  "other_files": [
+    {
+      "lfs": false,
+      "path": ".gitattributes",
+      "sha256": "",
+      "size": 1519
+    },
+    {
+      "lfs": false,
+      "path": "README.md",
+      "sha256": "",
+      "size": 8416
+    },
+    {
+      "lfs": true,
+      "path": "diffusion_models/minimax_h3_fl2va_bf16.safetensors",
+      "sha256": "907d4add438438ec1544f5240c3b38532ed934fe6be75677a6bbda2a6fdd6182",
+      "size": 66280487368
+    },
+    {
+      "lfs": true,
+      "path": "diffusion_models/minimax_h3_fl2va_int8_convrot.safetensors",
+      "sha256": "7ad4c73e6e378b822ffd1629f27f632d3787d95f5e468e3af958f98c58df96a5",
+      "size": 34038892334
+    },
+    {
+      "lfs": true,
+      "path": "diffusion_models/minimax_h3_fl2va_pruned_bf16.safetensors",
+      "sha256": "a32572fb90b5508b201ec7c2eddcc184b13ddfd3c6f6d2cf06a0b46535d541b4",
+      "size": 40225724176
+    },
+    {
+      "lfs": true,
+      "path": "diffusion_models/minimax_h3_fl2va_pruned_fp8_scaled.safetensors",
+      "sha256": "12944c1f7791637e7de12208aef04da82bd26b95271b1b47d817364315ade993",
+      "size": 20958205608
+    },
+    {
+      "lfs": true,
+      "path": "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "sha256": "e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a",
+      "size": 20970379616
+    },
+    {
+      "lfs": true,
+      "path": "diffusion_models/minimax_h3_fl2va_pruned_w6a8.safetensors",
+      "sha256": "ac746a2e41628ab25afd44d2b22a7fab8d7e66cd07a01bf89ed9d74b0d3f0c35",
+      "size": 15983746636
+    },
+    {
+      "lfs": true,
+      "path": "diffusion_models/minimax_h3_ref2va_bf16.safetensors",
+      "sha256": "e32c54c1a7b4f5f397f195cea267ccb18806303bb665678c4bee60953bdf3026",
+      "size": 66280487368
+    },
+    {
+      "lfs": true,
+      "path": "diffusion_models/minimax_h3_ref2va_int8_convrot.safetensors",
+      "sha256": "9eef934046a0671bc8a5daf87100705e1478419c574cfde70c50fbe6885f76a9",
+      "size": 34038894550
+    },
+    {
+      "lfs": true,
+      "path": "diffusion_models/minimax_h3_ref2va_pruned_bf16.safetensors",
+      "sha256": "37c0da793e20ca735272ec2be655f08a2e10f97a3ec8fdfb40f5b39a736ed6fe",
+      "size": 40225724176
+    },
+    {
+      "lfs": true,
+      "path": "diffusion_models/minimax_h3_ref2va_pruned_fp8_scaled.safetensors",
+      "sha256": "f86f2f79ebd2d76eb8eeb46091e83982e6ff51d255747e7b16e92834b392b8e9",
+      "size": 20958205608
+    },
+    {
+      "lfs": true,
+      "path": "diffusion_models/minimax_h3_ref2va_pruned_w6a8.safetensors",
+      "sha256": "ece96bbbce76670ec782de84acc888fd9d9b210bd2ab97c1957b39896734f9f1",
+      "size": 15983746636
+    },
+    {
+      "lfs": true,
+      "path": "embeddings/minimaxh3_art_is_explosion.safetensors",
+      "sha256": "00e8679c77ce1fc3fd3accb67bc4db56d626b6b27609797504ab00e2b997145f",
+      "size": 512120
+    },
+    {
+      "lfs": true,
+      "path": "embeddings/minimaxh3_blooming_flowers.safetensors",
+      "sha256": "934d1d2c50bf27cd0b3785b0f44b0b62119a90b2901f9193782d86ff7191cbe9",
+      "size": 1259640
+    },
+    {
+      "lfs": true,
+      "path": "embeddings/minimaxh3_bullet_time.safetensors",
+      "sha256": "e318b200d28c22fcf41d9b25ce481dd5a766f0ac50561663e33401975ea1bcae",
+      "size": 962680
+    },
+    {
+      "lfs": true,
+      "path": "embeddings/minimaxh3_dark_magic.safetensors",
+      "sha256": "71df9fe76f9cbb34a7508fc49d46bf35ee51744aaa17789c6406e1bec49f5866",
+      "size": 604280
+    },
+    {
+      "lfs": true,
+      "path": "embeddings/minimaxh3_fire_breath.safetensors",
+      "sha256": "ed048cf52802774a819e916bbf6ad6eaa047027abc6cd0decc63daccbb93c9f1",
+      "size": 1208440
+    },
+    {
+      "lfs": true,
+      "path": "embeddings/minimaxh3_four_seasons.safetensors",
+      "sha256": "9a432e89afc942d1ea27055372a6fb81c4dc0f4c0498a49b9f5eff1a015f1034",
+      "size": 1454200
+    },
+    {
+      "lfs": true,
+      "path": "embeddings/minimaxh3_kiss_camera.safetensors",
+      "sha256": "9da82f56c26f2a81b80803a31486d31036c122112203b62d4991759a90ddf4b8",
+      "size": 993400
+    },
+    {
+      "lfs": true,
+      "path": "embeddings/minimaxh3_spiral_ascent.safetensors",
+      "sha256": "767b6bdccee4c41805802a07bf3c04ba9582fbb8e7bc4bd416ff8e000e3e29b9",
+      "size": 1341560
+    },
+    {
+      "lfs": true,
+      "path": "embeddings/minimaxh3_storm_magic.safetensors",
+      "sha256": "5047cd4499207ef20d62872c7153a476e216e7edabd12b595802f567666d7425",
+      "size": 1403000
+    },
+    {
+      "lfs": true,
+      "path": "embeddings/minimaxh3_truman_show.safetensors",
+      "sha256": "3830e6ab9d7b95965f5497a6691bd92e33f8bf7a62bafb7b2331b268ff98aa00",
+      "size": 921720
+    },
+    {
+      "lfs": true,
+      "path": "loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
+      "sha256": "c396a9a06f58399e9df9754b18299818d84a2ddd371724ba48fe4a41221437dc",
+      "size": 1956192992
+    },
+    {
+      "lfs": true,
+      "path": "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+      "sha256": "2339acdf19bfe123f46b971ea35d367a84adb85de43627e1eceafa5a5b2b111e",
+      "size": 1956193000
+    },
+    {
+      "lfs": true,
+      "path": "loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+      "sha256": "5b9ab5ade15d0775676d01a907268a69a1468dc6033b3b0d3ded5502f3ebb84c",
+      "size": 1956193000
+    },
+    {
+      "lfs": true,
+      "path": "loras/pika_h3_flex_fl2va_v1_bf16.safetensors",
+      "sha256": "cc5453aeecd6189468409003fe4cf1b57e52ff3a830a0a154b87decbe07358b7",
+      "size": 1956172304
+    },
+    {
+      "lfs": true,
+      "path": "loras/pika_h3_flex_ref2va_v1_bf16.safetensors",
+      "sha256": "de3745ceb7d8d5c20898dd8fa3a05f1c0b00089ccd55297b2a8bab95c766b0e0",
+      "size": 1956172304
+    },
+    {
+      "lfs": true,
+      "path": "model_patches/minimax_h3_fun_controlnet_union_2.0_pruned_bf16.safetensors",
+      "sha256": "cd48bdc11b1f1a3b934746c898d25123754b335c13d37d5c421f8373079282b4",
+      "size": 8382288792
+    },
+    {
+      "lfs": true,
+      "path": "model_patches/minimax_h3_fun_controlnet_union_2.0_pruned_int8_convrot.safetensors",
+      "sha256": "890af58bb350f0c2f6c409b1c67ea8f4196654297d037769b72de1e6f504c612",
+      "size": 4531220608
+    },
+    {
+      "lfs": true,
+      "path": "model_patches/minimax_h3_fun_controlnet_union_pruned_bf16.safetensors",
+      "sha256": "57fe1e64928a63a55e3cd4586b55cd5d0eb4980648b6f31e5d9dac16fe7f1c48",
+      "size": 4222169456
+    },
+    {
+      "lfs": true,
+      "path": "model_patches/minimax_h3_fun_controlnet_union_pruned_int8_convrot.safetensors",
+      "sha256": "9c645c0a308c8af361efd43b409710f6f8fec0db297c29503e141a84991fed0c",
+      "size": 2296635360
+    },
+    {
+      "lfs": true,
+      "path": "text_encoders/qwen3vl_32b_minimax_h3_bf16.safetensors",
+      "sha256": "600d567f6a9629c8574e8e7041b199bdd9c59a986afa7906910a81919610607d",
+      "size": 51506295256
+    },
+    {
+      "lfs": true,
+      "path": "text_encoders/qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+      "sha256": "bc2ced0fbea64757fa9acddccfc0b3f4819d1dcf1da6c124d690d368be283923",
+      "size": 27141342152
+    },
+    {
+      "lfs": true,
+      "path": "vae/minimax_h3_sol_vae_fp16.safetensors",
+      "sha256": "61eaab3d7ca1659f20bce4d02bbc5bd5e5af608c73328d30cda96c8dc4d033e0",
+      "size": 3596335728
+    },
+    {
+      "lfs": true,
+      "path": "vae/minimax_h3_sol_vae_int8_convrot.safetensors",
+      "sha256": "a742069ba173bc3aba64cf8d8289d073e0818f2753f2fc2768f0342645089682",
+      "size": 1988306504
+    },
+    {
+      "lfs": true,
+      "path": "vae/minimax_h3_video_vae_fp16.safetensors",
+      "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522",
+      "size": 5207808496
+    }
+  ],
+  "repo": "Comfy-Org/MiniMax-H3",
+  "revision": "54472221d27c695fca9621b0c3ed52f06c4af707"
+}

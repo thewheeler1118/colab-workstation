@@ -1,0 +1,32 @@
+{
+  "archive_name": "comfyui-61e524bdba7a4e193b45c2697f1af83c1beb86d6.tar.gz",
+  "cache_drive_dir": "/content/drive/MyDrive/Muse-H3-ComfyUI-Source",
+  "cache_folder": "Muse-H3-ComfyUI-Source",
+  "commit": "61e524bdba7a4e193b45c2697f1af83c1beb86d6",
+  "created_utc": "2026-11-12T05:19:14Z",
+  "drive_files": {
+    "comfyui-61e524bdba7a4e193b45c2697f1af83c1beb86d6.tar.gz": {
+      "id": "1kYag5EfBsQFOWu38cawdyrBrP3eNNAqR",
+      "server_md5": "09d39ccecf7ffe9656b1914666e054e6",
+      "sha256": "3dca94e63945661778b79a9f784f415411748ebafeb54499570432ddf5f49a2f",
+      "size": 12670714
+    },
+    "comfyui-61e524bdba7a4e193b45c2697f1af83c1beb86d6.tar.gz.sha256": {
+      "id": "1cnYO1O8hPztK28TXgwE1QJxFdjbz2Et9",
+      "server_md5": "4de705f08e1d47a41ab5d30025b34719",
+      "sha256": "1ed622cf14c4ffd3456d857e604bf91a43d5d41f75c94c99e5fbd230378727de",
+      "size": 122
+    },
+    "comfyui-source-manifest.json": {
+      "id": "1Doj1K6Fv6wzYuNjqI1L9WdhNiL8bSUtX",
+      "server_md5": "a7a65c2c368a2e9d7af7f7b52a6aa919",
+      "sha256": "acc3fe8be1e21b780ef7526d5cc50264856680340970acd3daf7c4c7cc803ce3",
+      "size": 539
+    }
+  },
+  "drive_folder_id": "1MJXkdxXl4EMdKKMf2edpyRJLzQkYT86D",
+  "repo": "https://github.com/Comfy-Org/ComfyUI.git",
+  "sha256": "3dca94e63945661778b79a9f784f415411748ebafeb54499570432ddf5f49a2f",
+  "size_bytes": 12670714,
+  "source": "git archive of the pinned ComfyUI commit, plus COMFYUI_COMMIT.txt marker"
+}

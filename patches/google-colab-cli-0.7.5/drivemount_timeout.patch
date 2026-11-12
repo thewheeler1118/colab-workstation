@@ -1,0 +1,33 @@
+--- a/colab_cli/commands/automation.py
++++ b/colab_cli/commands/automation.py
+@@ -35,7 +35,13 @@
+ # raises ``TimeoutError`` mid-flow even though the mount actually succeeds.
+ # 10 minutes is long enough for any realistic interactive auth ceremony
+ # without leaving CI hangs unbounded.
+-INTERACTIVE_AUTOMATION_TIMEOUT_SEC = 600
++# 2026-11-11 (Muse H3 mount fix): the remote drive.mount() call now runs
++# with timeout_ms=600000 (see drivemount() below). jupyter-kernel-client
++# sets a hard wall-clock deadline of monotonic() + timeout for the whole
++# execute, so the local ceiling MUST exceed the remote 600s or the local
++# side kills the mount at the same instant the remote would succeed.
++# 660s leaves a 60s margin for propagation + reply after the mount lands.
++INTERACTIVE_AUTOMATION_TIMEOUT_SEC = 660
+ 
+ 
+ 
+@@ -214,7 +220,14 @@
+     from colab_cli.common import state
+ 
+     name = state.resolve_session(session)
+-    code = f"from google.colab import drive\ndrive.mount('{path}')"
++    # 2026-11-11 (Muse H3 mount fix): remote google.colab.drive.mount()
++    # defaults to timeout_ms=120000 measured from cell start, INCLUDING the
++    # wait for browser authorization. Runs 6-7 failed exactly here: auth
++    # completed at ~7-9 min, after the 120s kernel timer had already raised
++    # ValueError: mount failed. 600000ms (10 min) covers a realistic
++    # interactive ceremony; the local automation timeout is 660s so the
++    # local execute deadline never cuts the remote mount short.
++    code = f"from google.colab import drive\ndrive.mount('{path}', timeout_ms=600000)"
+     typer.echo(f"[colab] Mounting Google Drive to '{path}' on {name}...")
+     run_automation(
+         name,

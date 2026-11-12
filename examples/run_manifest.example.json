@@ -1,0 +1,1 @@
+{"gpu":"G4","note":"EXAMPLE ONLY — placeholder values, not a real run. Real run manifests are produced by h3_controller.run_variant and live in logs/<run_id>/ (gitignored).","per_session_budget_cu":25.0,"production_task_id":"h3-ab-20261111","project_budget_cu":30.0,"run_id":"h3-EXAMPLE-RUN-ID","session":"muse-h3-EXAMPLE","variant":"A"}

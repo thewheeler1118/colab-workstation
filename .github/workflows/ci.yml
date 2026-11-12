@@ -1,0 +1,53 @@
+name: CI (offline only)
+
+# Offline verification only. This workflow NEVER creates a Colab GPU, NEVER
+# touches Google Drive, and NEVER uses any credential. Real GPU acceptance
+# is a separate, explicitly authorised manual task (see docs/runbooks/).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install YAML for config tests
+        run: pip install "PyYAML>=6.0"
+      - name: Python syntax and import check
+        run: python -m py_compile *.py jobs/minimax_h3_ab/video_contract.py tests/*.py scripts/*.py
+      - name: Unit + mock integration tests (CI entry point)
+        # tests/run_ci_tests.py runs unittest discover, skipping only the two
+        # asset-gated poster tests (poster binary excluded from the repo).
+        run: python tests/run_ci_tests.py
+      - name: Workflow JSON schema check
+        run: python scripts/check_workflow_schema.py
+      - name: CLI patch verification (offline)
+        run: python scripts/verify_patch.py
+      - name: Secret scan (grep-based, file:line only — values never printed)
+        run: |
+          echo "Scanning for credential-like content..."
+          # Only file:line is ever printed, never the matched text.
+          # Notes: (a) .github/workflows/ci.yml itself is excluded — it
+          # contains these search patterns as literals and would self-match.
+          # (b) No loose JWT-shape pattern: it false-positives on long
+          # dotted model filenames (e.g. in config/pinned_hf_files.json).
+          # Google/GitHub tokens are covered by the ya29./ghp_/pat patterns.
+          HITS=$(grep -rInE -i '(ya29\.|ghp_[A-Za-z0-9]{20,}|github_pat_|-----BEGIN (RSA |OPENSSH |EC |PGP )?PRIVATE KEY|refresh_token\s*["'\'']?\s*[:=]\s*["'\''][A-Za-z0-9._-]{10,}|client_secret\s*["'\'']?\s*[:=]\s*["'\''][A-Za-z0-9._-]{10,})' \
+            --include='*.py' --include='*.json' --include='*.md' --include='*.yaml' --include='*.yml' --include='*.sh' --exclude='ci.yml' . \
+            | grep -v '^./reference_v2/colab_manager.py' || true)
+          if [ -n "$HITS" ]; then
+            echo "$HITS" | cut -d: -f1,2
+            echo "ERROR: secret scan found hits above (file:line only). Verify and redact before merge."
+            exit 1
+          fi
+          # Also fail on any tracked file that looks like a live credential/state file.
+          BAD_FILES=$(git ls-files | grep -E '(credentials|token|oauth|secret|application_default_credentials)' || true)
+          if [ -n "$BAD_FILES" ]; then echo "$BAD_FILES"; echo "ERROR: credential-like filenames tracked."; exit 1; fi
+          echo "Secret scan clean (redaction regexes in reference_v2/colab_manager.py are allow-listed)."
+      - name: Docs index + manifest consistency
+        run: python scripts/check_docs_index.py
