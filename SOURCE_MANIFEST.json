@@ -413,8 +413,8 @@
     },
     {
       "path": "docs/module_inventory.md",
-      "size_bytes": 32265,
-      "sha256": "9c8411dcd799a93a9796b3fee1f6d0c5efe7482a386725354a77b301c77d4828",
+      "size_bytes": 33597,
+      "sha256": "d2dbe89f48fec271964c24e846d3a98675c47c57e417b7d434b31f682aa906a2",
       "role": "Module inventory (this table's source of truth for hashes)"
     },
     {
@@ -551,8 +551,8 @@
     },
     {
       "path": "h3_controller.py",
-      "size_bytes": 73599,
-      "sha256": "f2ba0f42e8b81abc1da4256e3bc22a4a099ef36e28e64eaaf6ccae3e4459e0f3",
+      "size_bytes": 100991,
+      "sha256": "2b672dcc0da0f5fa856ea3169a73b91d71a1e6b2a7ac7719dda471f9d5a1cbc0",
       "role": "Run orchestration: preflight, allocation, mount, worker exec, download, stop"
     },
     {
@@ -572,6 +572,18 @@
       "size_bytes": 189,
       "sha256": "268c184c83c7551065938b661fc0412e871d3143d6e8c99bd7af367e5d6350c2",
       "role": "Remote workdir init script (run on Colab via colab exec)"
+    },
+    {
+      "path": "h3_job_probe.py",
+      "size_bytes": 1015,
+      "sha256": "5cbddbd98fc4a08f71472789d27e6c1709a0b212ce116aeae4ad1f4634df2728",
+      "role": "Supporting file"
+    },
+    {
+      "path": "h3_job_state.py",
+      "size_bytes": 4165,
+      "sha256": "8dc508199d3d75e79bcc2b5e24a3afbfd0823fd5eff4d0f6b7090cc2e3c43dc4",
+      "role": "Supporting file"
     },
     {
       "path": "h3_mount_acceptance.py",
@@ -599,8 +611,8 @@
     },
     {
       "path": "h3_remote_worker.py",
-      "size_bytes": 41012,
-      "sha256": "867a98456c47141b026390c166186984489bebbfd578c18e3fa979549790abf0",
+      "size_bytes": 42766,
+      "sha256": "ca94de29ff4a0ef82c4d501ebe82825bc117ca743e74b4bae51e73a1851723ba",
       "role": "Remote ComfyUI worker: restore, inference, find_rendered_video, assemble"
     },
     {
@@ -626,6 +638,12 @@
       "size_bytes": 9476,
       "sha256": "64c6666c538a3dce1e291e44f0ea671373dff8445b4296684756a2f520ca7fe7",
       "role": "Local final-video validation + poster-tail PSNR QA"
+    },
+    {
+      "path": "h3_worker_launcher.py",
+      "size_bytes": 2261,
+      "sha256": "99e78c67c8f0b8d3a6b6f83be75905e9fa85d72dbdae55ea9747c02994eabc6e",
+      "role": "Supporting file"
     },
     {
       "path": "jobs/minimax_h3_ab/README.md",
@@ -845,8 +863,8 @@
     },
     {
       "path": "tests/test_drive_delivery.py",
-      "size_bytes": 20257,
-      "sha256": "489ff56742d3182b57ed3f570c7ea4716f55d17fc210b810e1153b1cc441a74b",
+      "size_bytes": 21570,
+      "sha256": "a668c80ad80cd5c880041f5346530bb5b5f1305604b66dc83fa5864c87d0c9ef",
       "role": "Tests"
     },
     {
@@ -883,6 +901,12 @@
       "path": "tests/test_h3_video_qa.py",
       "size_bytes": 5299,
       "sha256": "d992f59a9f6f95cbb73f4377b8191584402e61f47b1d6f86ca6d2f2d9854f94d",
+      "role": "Tests"
+    },
+    {
+      "path": "tests/test_recoverable_controller.py",
+      "size_bytes": 29606,
+      "sha256": "7af1b843713982266cfce66c8a1af9dbbfd314e30a8336d1fcd9db5502c11aef",
       "role": "Tests"
     },
     {

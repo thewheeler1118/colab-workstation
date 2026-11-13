@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT=Path('/content/muse_h3')
 sys.path.insert(0,str(ROOT))
 from h3_contract import MODEL_FILES,validate_model_cache_manifest,sha256_file,patch_api_workflow,WIDTH,HEIGHT,ANIMATION_FRAMES,FPS
+from h3_job_state import WORKER_PHASE_TO_JOB_STAGE, write_job_state
 from assemble import run as assemble_video,ffprobe
 
 # ---- Worker stage tracking (user requirement 2026-11-11 09:12) ----
@@ -18,13 +19,29 @@ from assemble import run as assemble_video,ffprobe
 # and the exception, then re-raises (the controller stops the GPU in its
 # finally block). This is observability only: it does not claim the
 # 2026-11-11 worker failure itself is fixed.
+#
+# TASK-005 §4.2 (Issue #27): every phase ALSO writes the durable job
+# state file (MUSE_H3_JOB_STATE.json, atomic write) on the VM, so the
+# controller can poll the worker with short exec calls instead of holding
+# one long blocking exec. The state write is best-effort and never raises:
+# a failed bookkeeping write must not kill an inference. The state file
+# says where the worker is; the MP4 is still independently ffprobe-verified
+# before any success is reported.
 _LAST_STAGE = "init"
+_JOB_RUN_ID = ""
+_JOB_VARIANT = ""
 
 
 def set_stage(name: str) -> None:
     global _LAST_STAGE
     _LAST_STAGE = name
     print("WORKER_STAGE", name, flush=True)
+    if _JOB_RUN_ID and _JOB_VARIANT:
+        try:
+            write_job_state(ROOT, _JOB_RUN_ID, _JOB_VARIANT,
+                            WORKER_PHASE_TO_JOB_STAGE.get(name, name))
+        except Exception:
+            pass
 
 
 def _sanitize_text(text):
@@ -730,6 +747,9 @@ def main():
     version=task['variant']
     run_id=task.get('run_id','')
     if version not in ('A','B'):raise ValueError('bad variant')
+    global _JOB_RUN_ID, _JOB_VARIANT
+    _JOB_RUN_ID = run_id
+    _JOB_VARIANT = version
     manifest=json.loads((ROOT/'model_manifest.json').read_text())
     cache=Path(task['drive_cache_dir']);comfy=Path('/content/ComfyUI')
     if not (ROOT/'poster.jpg').is_file():raise FileNotFoundError('poster missing')
@@ -760,6 +780,10 @@ def main():
         validate_api_against_object_info(api,info)
         (ROOT/'workflow_submitted.json').write_text(json.dumps(api,ensure_ascii=False,indent=2))
         print('COMFY_OBJECT_INFO_VALIDATED',flush=True)
+        # Explicit MODELS_READY: only after object_info validation passed,
+        # never at the start of the validation stage (TASK-005 §4.2).
+        try:write_job_state(ROOT,run_id,version,'MODELS_READY')
+        except Exception:pass
         set_stage('inference_submit')
         outputs=execute_prompt(server,api,timeout_sec=task['inference_timeout_sec'])
         set_stage('find_rendered_video')
@@ -776,6 +800,9 @@ def main():
             rescued = rescue_rendered_video(comfy, run_id, version, remaining_budget_seconds=300)
             source = Path(rescued['path'])
             print('VIDEO_RESCUED_JSON:' + json.dumps(rescued, ensure_ascii=False), flush=True)
+        # Explicit INFERENCE_COMPLETED: a verifiable rendered video exists.
+        try:write_job_state(ROOT,run_id,version,'INFERENCE_COMPLETED')
+        except Exception:pass
         set_stage('assemble_mp4')
         final=ROOT/'output'/f'shao_nian_h3_{version}.mp4'
         info=assemble_video(source,ROOT/'poster.jpg',final)
@@ -784,8 +811,15 @@ def main():
         print('MP4_WRITTEN',str(final),final.stat().st_size,info.get('frames'),flush=True)
         (ROOT/'output'/f'{version}.json').write_text(json.dumps(info,ensure_ascii=False,indent=2))
         set_stage('done')
+        # VIDEO_READY carries the same done info as MUSE_H3_DONE_JSON, so
+        # a resumed controller can complete the run from the state file
+        # without re-reading the worker's stdout (TASK-005 §4.2).
+        try:write_job_state(ROOT,run_id,version,'VIDEO_READY',output=info)
+        except Exception:pass
         print('MUSE_H3_DONE_JSON:'+json.dumps(info,ensure_ascii=False),flush=True)
     except Exception as e:
+        try:write_job_state(ROOT,run_id,version,'FAILED',error=worker_failure_info(_LAST_STAGE,e))
+        except Exception:pass
         print('WORKER_FAILED_JSON:'+json.dumps(worker_failure_info(_LAST_STAGE,e),ensure_ascii=False),flush=True)
         # On a validation failure, persist the live schemas for the node
         # types in this workflow (compact, filtered): the next diagnosis

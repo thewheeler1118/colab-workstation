@@ -889,6 +889,493 @@ def _manifest_create(args, ledger) -> None:
             pass
 
 
+# ---------------------------------------------------------------------------
+# TASK-005 §4.2 (Issue #27): recoverable control plane.
+#
+# The old controller held ONE long blocking `colab exec` of the remote
+# worker script as its only control channel. When the Muse VM
+# restarted on 2026-11-12 (B run, ~09:48 UTC) that exec died with the
+# controller and nobody could tell where the worker had got to — the
+# orphaned A100 had to be stopped blind and the run was lost.
+#
+# The new shape: the worker runs DETACHED (launcher starts it and returns
+# immediately), writes a durable job state file on the VM after every
+# phase, and the controller polls that file with short exec calls. A
+# controller restart is recovered by `resume`, which reconciles the
+# manifest, the real session state, the worker state, the ledger, local
+# outputs and Drive evidence before doing anything.
+# ---------------------------------------------------------------------------
+
+class WorkerPollError(RuntimeError):
+    """One worker-state poll failed (exec error, timeout, missing or
+    corrupt state file). The worker may still be alive; callers retry a
+    bounded number of times, then fail closed."""
+
+
+# Job stages (h3_job_state) -> manifest stages (h3_run_manifest).
+# None means "heartbeat only": the manifest already sits at that stage.
+JOB_STAGE_TO_MANIFEST_STAGE = {
+    "JOB_STARTED": None,
+    "RESTORING_MODELS": None,
+    "MODELS_READY": "MODELS_READY",
+    "INFERENCE_RUNNING": None,
+    "INFERENCE_COMPLETED": "INFERENCE_COMPLETED",
+    "VIDEO_READY": None,  # handled by the caller (download path)
+    "FAILED": None,  # handled by the caller (raises)
+}
+
+
+def _manifest_worker_state(run_id: str, state: dict) -> None:
+    """Record a polled worker state in the durable manifest (best-effort).
+    Forward-only enforcement lives in update_run: a stale or out-of-order
+    poll is refused and logged as an anomaly, never applied."""
+    stage = (state or {}).get("stage")
+    manifest_stage = JOB_STAGE_TO_MANIFEST_STAGE.get(stage)
+    if manifest_stage:
+        _manifest_update(run_id, task_state=manifest_stage,
+                         last_verified_stage=manifest_stage)
+    else:
+        _manifest_update(run_id, heartbeat=True)
+
+
+def launch_worker(session: str) -> dict:
+    """Short-start the detached worker. Returns the launch record
+    (run_id, variant, pid, state_file, log_file). Raises on any launch
+    failure: a launch that cannot be observed fails fast here instead of
+    leaving an untracked worker behind on a paid GPU."""
+    result = exec_script(session, ROOT / "h3_worker_launcher.py", timeout=180)
+    text = (result or {}).get("stdout", "") or ""
+    for line in text.splitlines():
+        if line.startswith("MUSE_H3_LAUNCH_JSON:"):
+            return json.loads(line.split("MUSE_H3_LAUNCH_JSON:", 1)[1].strip())
+    tail = (text + "\n" + ((result or {}).get("stderr", "") or ""))[-1500:]
+    raise RuntimeError(
+        f"Worker launcher did not print MUSE_H3_LAUNCH_JSON; launcher output tail:\n{tail}")
+
+
+def poll_worker(session: str) -> dict:
+    """One short probe of the worker's durable job state. Returns the
+    state dict. Raises WorkerPollError on exec failure, timeout, a
+    missing/corrupt state file, or an incomplete record — never a silent
+    'no worker' answer."""
+    try:
+        result = exec_script(session, ROOT / "h3_job_probe.py", timeout=90)
+    except Exception as e:  # noqa: BLE001 - any exec failure is a poll failure
+        raise WorkerPollError(f"probe exec failed: {e}") from e
+    text = (result or {}).get("stdout", "") or ""
+    for line in text.splitlines():
+        if line.startswith("MUSE_H3_JOB_STATE_JSON:"):
+            try:
+                state = json.loads(line.split("MUSE_H3_JOB_STATE_JSON:", 1)[1].strip())
+            except json.JSONDecodeError as e:
+                raise WorkerPollError(f"probe returned unparseable state JSON: {e}") from e
+            if not isinstance(state, dict) or not state.get("run_id") \
+                    or not state.get("variant") or not state.get("stage"):
+                raise WorkerPollError(f"probe returned an incomplete state record: {state!r}"[:300])
+            return state
+        if line.startswith("MUSE_H3_JOB_STATE_MISSING"):
+            raise WorkerPollError(
+                "job state file missing on the remote (worker never started or the VM lost the workdir)")
+        if line.startswith("MUSE_H3_JOB_STATE_CORRUPT"):
+            raise WorkerPollError(f"job state file corrupt on the remote: {line[:300]}")
+    tail = (text + "\n" + ((result or {}).get("stderr", "") or ""))[-1000:]
+    raise WorkerPollError(f"probe printed no job state marker; probe output tail:\n{tail}")
+
+
+def check_job_done_info(done_info, variant: str) -> dict:
+    """Fail-closed validation of a VIDEO_READY output record, mirroring
+    check_worker_done_marker's contract for the detached path: the record
+    must name a 274-frame final MP4 with a SHA-256. The remote ffprobe
+    check and the local validation after download are still the real
+    gates; this only proves the worker claims a complete output."""
+    if not isinstance(done_info, dict):
+        raise RuntimeError(
+            f"Worker VIDEO_READY record is not an object for variant {variant}: {done_info!r}"[:300])
+    if done_info.get("frames") != 274:
+        raise RuntimeError(
+            f"Worker VIDEO_READY record has frames={done_info.get('frames')!r}, expected 274")
+    if not done_info.get("file") or not done_info.get("sha256"):
+        raise RuntimeError(
+            f"Worker VIDEO_READY record is missing file/sha256: {done_info!r}"[:300])
+    return done_info
+
+
+def wait_for_worker(session: str, run_id: str, variant: str,
+                    deadline_monotonic: float, poll_interval_sec: int = 60,
+                    max_consecutive_poll_failures: int = 3,
+                    on_state=None) -> dict:
+    """Poll the detached worker until VIDEO_READY. Returns the final
+    worker state. Raises on worker FAILED, on the budget wall time, on
+    too many consecutive poll failures, on an unknown stage, or on a
+    state record that belongs to another run. A failed poll never means
+    'the worker is dead': the loop retries, and only the bounded failure
+    count turns unobservability into a run failure (the GPU is then
+    stopped by the caller's finally block, exactly as before)."""
+    failures = 0
+    while True:
+        if time.monotonic() > deadline_monotonic:
+            raise TimeoutError(
+                f"Worker for run {run_id} did not finish before the budget wall time")
+        try:
+            state = poll_worker(session)
+        except WorkerPollError as e:
+            failures += 1
+            if failures >= max_consecutive_poll_failures:
+                raise RuntimeError(
+                    f"Worker state unobservable after {failures} consecutive poll "
+                    f"failures: {e}") from e
+            time.sleep(poll_interval_sec)
+            continue
+        failures = 0
+        if state.get("run_id") != run_id or state.get("variant") != variant:
+            raise RuntimeError(
+                f"Worker state belongs to another run: {state.get('run_id')!r}/"
+                f"{state.get('variant')!r}, expected {run_id}/{variant}")
+        if on_state is not None:
+            on_state(state)
+        stage = state.get("stage")
+        if stage == "VIDEO_READY":
+            return state
+        if stage == "FAILED":
+            err = state.get("error") or {}
+            raise RuntimeError(
+                f"Remote worker failed at stage {err.get('stage')}: "
+                f"{err.get('error_type')}: {err.get('error')}")
+        if stage not in JOB_STAGE_TO_MANIFEST_STAGE:
+            raise RuntimeError(f"Unknown worker job stage: {stage!r}")
+        time.sleep(poll_interval_sec)
+
+
+def _archive_local_mp4(variant: str, run_id: str) -> dict:
+    """Archive-only delivery (TASK-003 §1, shared by the `archive` action
+    and by `resume`): re-validate the local MP4 and upload it with
+    bounded retries. No GPU, no session, no ledger, never a re-run of
+    the inference."""
+    from h3_video_qa import validate_final_video
+
+    info = validate_final_video(OUTPUT_ROOT / run_id / f"{variant}.mp4")
+    return deliver_variant_to_drive(variant, run_id, info)
+
+
+def _resume_archive_only(args, manifest: dict) -> dict:
+    """COMPLETED_AWAITING_ARCHIVE: the local MP4 is durable; only the
+    Drive upload is missing. Archive it and complete the run."""
+    run_id = manifest["run_id"]
+    variant = manifest["variant"]
+    try:
+        delivery = _archive_local_mp4(variant, run_id)
+    except Exception as e:  # noqa: BLE001 - stays awaiting archive
+        return {"resumed": False, "run_id": run_id,
+                "reason": f"archive-only retry failed, still awaiting archive: {e}",
+                "manifest_task_state": "COMPLETED_AWAITING_ARCHIVE"}
+    _manifest_update(run_id, task_state="DRIVE_VERIFIED",
+                     last_verified_stage="DRIVE_VERIFIED",
+                     artifacts={"drive_file_id": delivery.get("drive_file_id"),
+                                "drive_output_folder_id": delivery.get("drive_output_folder_id")},
+                     reopen=True)  # COMPLETED_AWAITING_ARCHIVE is terminal; resume reopens it.
+    _manifest_update(run_id, task_state="TASK_COMPLETED")
+    return {"resumed": True, "run_id": run_id, "variant": variant,
+            "outcome": "archive-only retry succeeded", "delivery": delivery}
+
+
+def _resume_stopped_session(args, manifest: dict) -> dict:
+    """The session is gone, so the remote temp disk is gone with it.
+    Recover only from durable copies: a validated local MP4 (archive it),
+    or a Drive file id the manifest already recorded (verify it
+    server-side first). Never re-infer, never allocate a new GPU here."""
+    from h3_run_manifest import update_run
+
+    run_id = manifest["run_id"]
+    variant = manifest["variant"]
+    local_mp4 = OUTPUT_ROOT / run_id / f"{variant}.mp4"
+    if local_mp4.is_file():
+        try:
+            delivery = _archive_local_mp4(variant, run_id)
+        except Exception as e:  # noqa: BLE001 - local copy unusable
+            return {"resumed": False, "run_id": run_id,
+                    "reason": f"session stopped and the local MP4 cannot be archived: {e}"}
+        _manifest_update(run_id, task_state="DRIVE_VERIFIED",
+                         last_verified_stage="DRIVE_VERIFIED",
+                         artifacts={"drive_file_id": delivery.get("drive_file_id"),
+                                    "drive_output_folder_id": delivery.get("drive_output_folder_id")})
+        _manifest_update(run_id, task_state="TASK_COMPLETED")
+        return {"resumed": True, "run_id": run_id, "variant": variant,
+                "outcome": "session stopped; validated local MP4 archived",
+                "delivery": delivery}
+    drive_file_id = (manifest.get("artifacts") or {}).get("drive_file_id")
+    if drive_file_id:
+        try:
+            from drive_depot import drive_service
+
+            drive = drive_service()
+            meta = drive.files().get(fileId=drive_file_id,
+                                     fields="id,name,size,trashed,md5Checksum").execute()
+            if meta.get("id") == drive_file_id and not meta.get("trashed"):
+                _manifest_update(run_id, task_state="DRIVE_VERIFIED",
+                                 last_verified_stage="DRIVE_VERIFIED")
+                _manifest_update(run_id, task_state="TASK_COMPLETED")
+                return {"resumed": True, "run_id": run_id, "variant": variant,
+                        "outcome": "session stopped; Drive file already verified server-side",
+                        "drive_file_id": drive_file_id}
+        except Exception as e:  # noqa: BLE001 - Drive check unavailable
+            return {"resumed": False, "run_id": run_id,
+                    "reason": f"session stopped; Drive verification unavailable: {e}"}
+    update_run(ROOT, run_id, task_state="FAILED",
+               last_error="Session stopped with no durable artifact: no validated "
+                          "local MP4 and no verified Drive file")
+    return {"resumed": False, "run_id": run_id,
+            "reason": "session stopped and no durable artifact (no validated local "
+                      "MP4, no verified Drive file); nothing recoverable — start a new run"}
+
+
+def _resume_finish(args, manifest: dict, worker_state: dict) -> dict:
+    """Complete a run whose worker reached VIDEO_READY. Mirrors
+    run_variant's post-worker section in the same order: remote output
+    check, download (skipped when the local MP4 already validates —
+    never re-download a validated file), stop, Drive deliver. Never
+    re-infers."""
+    run_id = manifest["run_id"]
+    variant = manifest["variant"]
+    session_id = manifest["session_id"]
+    done_info = check_job_done_info(worker_state.get("output"), variant)
+    output_check = exec_script(session_id, ROOT / "h3_output_check.py", timeout=180,
+                               env={"H3_VARIANT": variant})
+    check_remote_output(output_check, variant)
+    record({"event": "resume_remote_output_checked", "variant": variant,
+            "session": session_id, "done": done_info})
+    from h3_video_qa import validate_final_video
+
+    info = None
+    local_mp4 = OUTPUT_ROOT / run_id / f"{variant}.mp4"
+    if local_mp4.is_file():
+        try:
+            info = validate_final_video(local_mp4)
+            record({"event": "resume_local_mp4_reused", "variant": variant,
+                    "run_id": run_id, "sha256": info["sha256"]})
+        except Exception:
+            info = None  # re-download below; a stale local file is never trusted
+    if info is None:
+        info = download_and_validate_variant(session_id, variant, run_id)
+    _manifest_update(run_id, task_state="VIDEO_VALIDATED",
+                     last_verified_stage="VIDEO_VALIDATED",
+                     artifacts={"local_sha256": info["sha256"],
+                                "local_frames": info["frame_count"]})
+    _manifest_update(run_id, task_state="ARTIFACT_DURABLE")
+    live = inspect()
+    production_result = {
+        "variant": variant, "run_id": run_id, "session": session_id,
+        "video": info, "live_balance_cu": live["cu_balance"],
+        "live_rate_cu_h": live["rate"],
+        "delivery": {"state": "LOCAL_MP4_VALIDATED", "variant": variant,
+                     "run_id": run_id, "local_video_validated": True},
+        "resumed": True,
+    }
+    # The GPU is stopped and verified BEFORE any Drive upload, exactly as
+    # in run_variant's tail.
+    stop_result = stop_and_verify_session(session_id)
+    stop_ok = stop_result["stopped_confirmed"]
+    if not stop_ok:
+        _manifest_update(run_id, task_state="FAILED", session_state="UNKNOWN",
+                         last_error="Stop not verified; run FAILED regardless of generated files")
+        raise RuntimeError("Stop not verified; run FAILED regardless of generated files")
+    _manifest_update(run_id, task_state="GPU_STOP_CONFIRMED", session_state="STOPPED")
+    try:
+        delivery = deliver_variant_to_drive(variant, run_id, info)
+    except Exception as e:  # noqa: BLE001 - video is durable locally
+        _manifest_update(run_id, task_state="COMPLETED_AWAITING_ARCHIVE",
+                         last_error=str(e)[:500])
+        raise
+    production_result["delivery"] = delivery
+    _manifest_update(run_id, task_state="DRIVE_VERIFIED",
+                     last_verified_stage="DRIVE_VERIFIED",
+                     artifacts={"drive_file_id": delivery.get("drive_file_id"),
+                                "drive_output_folder_id": delivery.get("drive_output_folder_id")})
+    _manifest_update(run_id, task_state="TASK_COMPLETED")
+    return production_result
+
+
+def _resume_run(args) -> dict:
+    """Reconcile a run from its durable manifest and resume it if it is
+    safe to do so. The checklist (TASK-005 §4.3), in order:
+    terminal states, code version, task ledger, real session state,
+    worker state, local outputs, Drive evidence.
+    Refusals never allocate a GPU, never stop a session blindly, never
+    re-generate a completed video, never re-upload into a conflicting
+    deliverable, and never create a 30 CU ledger."""
+    from h3_run_manifest import resume_run
+
+    run_id = args.run_id
+    view = resume_run(ROOT, run_id)
+    manifest = view["manifest"]
+    state = manifest.get("task_state")
+    if state == "TASK_COMPLETED":
+        return {"resumed": False, "run_id": run_id,
+                "reason": "already completed", "view": view}
+    if state == "FAILED":
+        return {"resumed": False, "run_id": run_id,
+                "reason": view.get("reason") or "run FAILED; start a new run id",
+                "view": view}
+    if state == "COMPLETED_AWAITING_ARCHIVE":
+        return _resume_archive_only(args, manifest)
+    # Code version: resume only with the exact code the run started with.
+    # A synced newer controller is a new decision, not a silent upgrade
+    # of a half-finished run.
+    try:
+        import subprocess
+
+        current_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(ROOT), capture_output=True,
+            text=True, timeout=10).stdout.strip()
+    except Exception:
+        current_commit = ""
+    started_commit = manifest.get("code_commit") or ""
+    if started_commit and current_commit and started_commit != current_commit:
+        return {"resumed": False, "run_id": run_id,
+                "reason": f"code mismatch: run started at {started_commit}, "
+                          f"current HEAD is {current_commit}; refusing to resume "
+                          f"with different controller code",
+                "view": view}
+    # Ledger must already exist: resume never creates a 30 CU ledger.
+    task_id = manifest.get("production_task_id")
+    ledger_path = ledger_path_for_task(ROOT, task_id)
+    if not ledger_path.is_file():
+        return {"resumed": False, "run_id": run_id,
+                "reason": f"no budget ledger for task {task_id}; resume never "
+                          f"creates a 30 CU ledger",
+                "view": view}
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    session_id = manifest.get("session_id")
+    if not session_id:
+        return {"resumed": False, "run_id": run_id,
+                "reason": "manifest has no session id; nothing to resume",
+                "view": view}
+    # Real session state (tristate, PR-1). UNKNOWN refuses everything.
+    from h3_session_watchdog import SessionQueryError, query_session_state
+    from h3_session_watchdog import SessionState
+
+    try:
+        session_state = query_session_state(session_id, colab_auth=_COLAB_AUTH)
+    except SessionQueryError as e:
+        return {"resumed": False, "run_id": run_id,
+                "reason": f"session state UNKNOWN ({e}); refusing to allocate "
+                          f"a second GPU or stop blindly",
+                "view": view}
+    if session_state == SessionState.STOPPED:
+        return _resume_stopped_session(args, manifest)
+    if session_state == SessionState.UNKNOWN:
+        return {"resumed": False, "run_id": run_id,
+                "reason": "session state UNKNOWN; refusing to allocate a "
+                          "second GPU or stop blindly",
+                "view": view}
+    # Session ACTIVE: probe the worker (a single unobservable probe here
+    # refuses instead of guessing; the session is left running).
+    try:
+        worker_state = poll_worker(session_id)
+    except WorkerPollError as e:
+        return {"resumed": False, "run_id": run_id,
+                "reason": f"worker state unobservable ({e}); session left "
+                          f"running — stop it explicitly with the stop action "
+                          f"if it should not continue",
+                "view": view}
+    if worker_state.get("run_id") != run_id \
+            or worker_state.get("variant") != manifest.get("variant"):
+        return {"resumed": False, "run_id": run_id,
+                "reason": f"worker state belongs to another run: "
+                          f"{worker_state.get('run_id')!r}/{worker_state.get('variant')!r}",
+                "view": view}
+    variant = manifest["variant"]
+    if worker_state.get("stage") == "FAILED":
+        err = worker_state.get("error") or {}
+        stop_result = stop_and_verify_session(session_id)
+        stop_ok = stop_result["stopped_confirmed"]
+        _manifest_update(run_id, task_state="FAILED",
+                         session_state="STOPPED" if stop_ok else "UNKNOWN",
+                         last_error=f"Remote worker failed at stage {err.get('stage')}: "
+                                    f"{err.get('error_type')}: {err.get('error')}"[:500])
+        return {"resumed": True, "run_id": run_id,
+                "outcome": "worker failed; session stopped and run marked FAILED",
+                "stop_verified": stop_ok}
+    if worker_state.get("stage") == "VIDEO_READY":
+        return _resume_finish(args, manifest, worker_state)
+    # Still running: re-enter the poll loop under the remaining budget,
+    # then finish the run the same way.
+    live = inspect()
+    if live["rate"] is None or live["rate"] <= 0:
+        return {"resumed": False, "run_id": run_id,
+                "reason": "live CU/hr rate unreadable; cannot bound a resumed poll loop",
+                "view": view}
+    budget_sec = allowed_runtime_seconds(live["rate"], live["cu_balance"], ledger)
+    budget_sec = min(budget_sec, getattr(args, "max_wall_sec", MAX_SESSION_SECONDS))
+    if budget_sec < 300:
+        return {"resumed": False, "run_id": run_id,
+                "reason": "remaining budget cannot cover a minimal resumed run + cleanup reserve",
+                "view": view}
+    worker_state = wait_for_worker(
+        session_id, run_id, variant,
+        deadline_monotonic=time.monotonic() + budget_sec,
+        poll_interval_sec=getattr(args, "poll_interval_sec", 60),
+        on_state=lambda s: _manifest_worker_state(run_id, s))
+    return _resume_finish(args, manifest, worker_state)
+
+
+def _stop_run(args) -> dict:
+    """Stop a run's managed session via the structured stop contract
+    (PR-2). Refuses when the manifest has no session, or the session is
+    not in the managed file — a non-project session is never stopped."""
+    from h3_run_manifest import load_run_manifest, update_run
+    from h3_session_watchdog import stop_managed_session
+
+    if not args.run_id:
+        raise ValueError("--run-id is required for stop")
+    manifest = load_run_manifest(ROOT, args.run_id)
+    session_id = manifest.get("session_id")
+    if not session_id:
+        raise ValueError(f"manifest for run {args.run_id} has no session id; nothing to stop")
+    result = stop_managed_session(session_id, colab_auth=_COLAB_AUTH)
+    if result.get("state") == "STOPPED":
+        update_run(ROOT, args.run_id, session_state="STOPPED")
+    return result
+
+
+def _reconcile_task(args) -> dict:
+    """Reconcile every manifest of one production task against the real
+    session state. Corrects a manifest's session_state only from a
+    definitive tristate answer; UNKNOWN is reported and left alone.
+    Never stops anything, never allocates anything."""
+    from h3_run_manifest import list_runs, update_run
+    from h3_session_watchdog import SessionQueryError, query_session_state
+
+    if not args.production_task_id:
+        raise ValueError("--production-task-id is required for reconcile")
+    report = {"production_task_id": args.production_task_id, "runs": [],
+              "corrections": 0, "unknown": []}
+    for manifest in list_runs(ROOT):
+        if manifest.get("production_task_id") != args.production_task_id:
+            continue
+        entry = {"run_id": manifest["run_id"],
+                 "task_state": manifest.get("task_state"),
+                 "manifest_session_state": manifest.get("session_state"),
+                 "session_id": manifest.get("session_id"),
+                 "live_session_state": None}
+        session_id = manifest.get("session_id")
+        if session_id:
+            try:
+                live = query_session_state(session_id, colab_auth=_COLAB_AUTH)
+            except SessionQueryError as e:
+                entry["live_session_state"] = "UNKNOWN"
+                entry["error"] = str(e)[:300]
+                report["unknown"].append(manifest["run_id"])
+                report["runs"].append(entry)
+                continue
+            entry["live_session_state"] = live.value
+            if live.value != manifest.get("session_state"):
+                update_run(ROOT, manifest["run_id"], session_state=live)
+                entry["corrected_to"] = live.value
+                report["corrections"] += 1
+        report["runs"].append(entry)
+    return report
+
+
 def run_variant(args) -> dict:
     global _EXEC_LOG_DIR, LEDGER_PATH, PRODUCTION_TASK_ID
     variant = args.variant
@@ -1134,6 +1621,15 @@ def run_variant(args) -> dict:
             persist_exec_result(run_dir, f"drive_probe_{variant}", mount_probe)
             if "MUSE_DRIVE_MOUNT_MODELS_VISIBLE 4" not in mount_probe["stdout"]:
                 raise RuntimeError("Mounted Drive model cache not visible; release GPU")
+            # Worker files go up only after the mounted-cache probe passed:
+            # the probe must run before the remote worker that does H3
+            # inference (and the test in test_auth_and_transport enforces
+            # this order). The launcher needs both files on the remote disk.
+            for source, target in [
+                (ROOT / "h3_job_state.py", REMOTE + "/h3_job_state.py"),
+                (ROOT / "h3_remote_worker.py", REMOTE + "/h3_remote_worker.py"),
+            ]:
+                run_cli(["upload", "-s", session, str(source), target], timeout=300)
             # Single-variant remote worker.
             elapsed = time.monotonic() - start
             if elapsed > budget_sec:
@@ -1147,13 +1643,20 @@ def run_variant(args) -> dict:
             task_path.write_text(json.dumps(task))
             run_cli(["upload", "-s", session, str(task_path), REMOTE + "/task.json"], timeout=120)
             _manifest_update(args.run_id, task_state="WORKER_STARTED", heartbeat=True)
-            worker_result = exec_script(session, ROOT / "h3_remote_worker.py", timeout=max(120, int(budget_sec - elapsed)))
-            persist_exec_result(run_dir, f"worker_{variant}", worker_result)
-            # Fail closed on the worker's own success marker: `colab exec`
-            # can return 0 even when the remote cell raised, so the
-            # download below must never run on a bare returncode.
+            # Recoverable control plane (TASK-005 §4.2): short-start the
+            # detached worker, then poll its durable state file. The old
+            # single long blocking exec is gone: a controller restart no
+            # longer loses the worker's progress, and `resume` can pick
+            # the run back up from the manifest + state file.
+            launch = launch_worker(session)
+            record({"event": "worker_launched", "variant": variant, "session": session, "launch": launch})
             try:
-                done_info = check_worker_done_marker(worker_result, variant)
+                worker_state = wait_for_worker(
+                    session, args.run_id, variant,
+                    deadline_monotonic=start + budget_sec,
+                    poll_interval_sec=getattr(args, "poll_interval_sec", 60),
+                    on_state=lambda s: _manifest_worker_state(args.run_id, s))
+                done_info = check_job_done_info(worker_state.get("output"), variant)
             except Exception:
                 # Pull the server log before the session stops: it holds
                 # the /prompt rejection detail the worker output may lack.
@@ -1294,14 +1797,11 @@ def test_or_run(args):
         # 274-frame final video) and run the deliver helper, which re-proves
         # the file and uploads with bounded retries. Use after a run whose
         # local MP4 survived but whose Drive upload failed.
-        from h3_video_qa import validate_final_video
-
         if not args.variant:
             raise ValueError("--variant A|B is required for archive")
         if not args.run_id:
             raise ValueError("--run-id is required for archive")
-        info = validate_final_video(OUTPUT_ROOT / args.run_id / f"{args.variant}.mp4")
-        delivery = deliver_variant_to_drive(args.variant, args.run_id, info)
+        delivery = _archive_local_mp4(args.variant, args.run_id)
         print(json.dumps(delivery, ensure_ascii=False, indent=2))
         return delivery
     if args.action == "status":
@@ -1314,6 +1814,30 @@ def test_or_run(args):
             raise ValueError("--run-id is required for status")
         print(json.dumps(recovery_view(ROOT, args.run_id), ensure_ascii=False, indent=2))
         return
+    if args.action == "resume":
+        # TASK-005 §4.3: reconcile the manifest, code version, ledger,
+        # real session state, worker state, local outputs and Drive
+        # evidence, then resume the run if it is safe. Refusals never
+        # allocate a GPU, never stop a session blindly, never re-generate
+        # a completed video, and never create a 30 CU ledger.
+        if not args.run_id:
+            raise ValueError("--run-id is required for resume")
+        result = _resume_run(args)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return result
+    if args.action == "stop":
+        # TASK-005 §4.3: stop a run's managed session via the structured
+        # stop contract. Refuses non-managed sessions outright.
+        result = _stop_run(args)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return result
+    if args.action == "reconcile":
+        # TASK-005 §4.3: correct each manifest's session_state from a
+        # definitive tristate query. Read-only for sessions: never stops
+        # or allocates anything.
+        result = _reconcile_task(args)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return result
     if args.action != "run":
         raise ValueError("Unknown action")
     result = run_variant(args)
@@ -1323,7 +1847,8 @@ def test_or_run(args):
 def main():
     global _COLAB_AUTH, PRODUCTION_TASK_ID, LEDGER_PATH, PRIOR_TASK_UNBILLED_RESERVE_CU
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["plan", "check", "run", "preflight", "archive", "status"])
+    parser.add_argument("action", choices=["plan", "check", "run", "preflight", "archive", "status",
+                                            "resume", "stop", "reconcile"])
     parser.add_argument("--colab-auth", choices=("oauth2", "adc"), default="adc")
     parser.add_argument("--workflow-api", default=str(ROOT / "workflow_api.json"))
     parser.add_argument("--cache-manifest", default=str(ROOT / "model_cache" / "verified_manifest.json"))
@@ -1345,6 +1870,8 @@ def main():
     parser.add_argument("--run-id", default="")
     parser.add_argument("--max-rate-cu-h", type=float, default=14.0)
     parser.add_argument("--max-wall-sec", type=int, default=MAX_SESSION_SECONDS)
+    parser.add_argument("--poll-interval-sec", type=int, default=60,
+                        help="Seconds between worker-state polls (TASK-005 §4.2).")
     parser.add_argument("--approve-interactive-drive-mount", action="store_true")
     parser.add_argument("--fresh-inference", action="store_true")
     for flag in ("execute", "confirm-gpu", "authorize-task-gpu", "allow-g4", "allow-a100-highmem"):
@@ -1361,6 +1888,10 @@ def main():
         parser.error("--variant A|B is required for run/archive")
     if a.action in ("run", "archive") and not a.run_id:
         parser.error("--run-id is required for run/archive")
+    if a.action in ("resume", "stop") and not a.run_id:
+        parser.error("--run-id is required for resume/stop")
+    if a.action == "reconcile" and not a.production_task_id:
+        parser.error("--production-task-id is required for reconcile")
     if a.action == "preflight" and not a.run_id:
         a.run_id = create_run_id()
     try:
