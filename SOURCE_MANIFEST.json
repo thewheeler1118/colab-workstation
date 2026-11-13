@@ -35,8 +35,8 @@
     },
     {
       "path": "AGENTS.md",
-      "size_bytes": 4112,
-      "sha256": "3fba35883d80c34a333ad9a72bb699d6d6da1f7c17ea14281d599928d873a899",
+      "size_bytes": 4752,
+      "sha256": "fc3b6cb57327fb0fe77157b9f803a70534cdfe1e21e19a8668b06b6a083abf8d",
       "role": "Supporting file"
     },
     {
@@ -752,12 +752,6 @@
       "size_bytes": 1171,
       "sha256": "b149891e645453a0a9eaab319edfe4cbcc7520c46503798ec24ebc768e498ca1",
       "role": "Job definition / facade"
-    },
-    {
-      "path": "logs/h3_audit.jsonl",
-      "size_bytes": 748,
-      "sha256": "862f7cc4c9b0bdc1022b64556ba12aafce51cfa59b687e3ae929c7cbb5cc761d",
-      "role": "Supporting file"
     },
     {
       "path": "model_cache/verified_manifest.example.json",
