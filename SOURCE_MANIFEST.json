@@ -413,8 +413,8 @@
     },
     {
       "path": "docs/module_inventory.md",
-      "size_bytes": 36927,
-      "sha256": "d67cad0b9d663a9b16b45700eaec36254dc4cd27d2c36ef998bec82c25e86909",
+      "size_bytes": 37589,
+      "sha256": "562fa28b6f1f7bacedc3d6ec0ed619e3cfabf2cfd6f8bdba91fbda2ae5f2b4d1",
       "role": "Module inventory (this table's source of truth for hashes)"
     },
     {
@@ -557,8 +557,8 @@
     },
     {
       "path": "h3_controller.py",
-      "size_bytes": 107153,
-      "sha256": "f47471fae626377f56d99855795a5fccf1d404281ec244af9cc6acaa9e3ba5b8",
+      "size_bytes": 108326,
+      "sha256": "084f8cd53c487d8a32f98fc7f74d1409b8c3b67e2641c12ec974079b417fdeef",
       "role": "Run orchestration: preflight, allocation, mount, worker exec, download, stop"
     },
     {
@@ -641,8 +641,8 @@
     },
     {
       "path": "h3_run_manifest.py",
-      "size_bytes": 12698,
-      "sha256": "e134cb9753956151cd757e63541132889cdc1fcb08d18ada25e322c52dceb32c",
+      "size_bytes": 13331,
+      "sha256": "991163339c063e4d0d6b6d35d86ab1b71656df283a9c10f99572494467a94bf8",
       "role": "Supporting file"
     },
     {
@@ -925,6 +925,12 @@
       "path": "tests/test_environment_contract.py",
       "size_bytes": 10124,
       "sha256": "23c42cc8aabfb605b54f1d0af896f84bbd0b4ffd4ac7997b2a13610087bc103f",
+      "role": "Tests"
+    },
+    {
+      "path": "tests/test_fault_injection.py",
+      "size_bytes": 48426,
+      "sha256": "a71dce858905397f5c4fa87417cdeb49d92e550c3e3d4682c92d72d1f6875fd4",
       "role": "Tests"
     },
     {

@@ -1521,6 +1521,25 @@ def run_variant(args) -> dict:
         raise RuntimeError("G4 blocked: --approve-interactive-drive-mount required")
     if not args.fresh_inference:
         raise RuntimeError("--fresh-inference required for a from-zero production run")
+    # TASK-005 §8 (Issue #31): a run_id is the run's identity. A second
+    # `run` with the same run_id would allocate a second paid GPU, re-run
+    # inference, and collide with the first run's manifest stages (the
+    # manifest is forward-only and terminal states refuse moves). Refuse
+    # BEFORE any external call or ledger mutation; `status`/`resume` are
+    # the paths to inspect or recover the existing run, and a retry uses
+    # a fresh run_id. (A run that failed before allocation also needs a
+    # fresh run_id — by design, since run_ids are cheap timestamps.)
+    from h3_run_manifest import load_run_manifest, manifest_exists
+
+    if manifest_exists(ROOT, args.run_id):
+        try:
+            _state = load_run_manifest(ROOT, args.run_id).get("task_state")
+        except Exception:
+            _state = "unknown"
+        raise RuntimeError(
+            f"run_id {args.run_id} already exists (state {_state}); refusing to start a second run "
+            f"with the same run id — a duplicate run would allocate a second paid GPU and re-run "
+            f"inference. Use a new run id, or 'status'/'resume' to inspect or recover the existing run.")
     validate_local(args.workflow_api, args.cache_manifest)
     validate_comfy_workflow(args.workflow_api, variant)
     # Live Drive READY + same account, before any paid GPU.
