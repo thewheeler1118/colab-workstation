@@ -26,6 +26,8 @@ sys.path.insert(0, str(ROOT))
 import h3_controller as hc  # noqa: E402
 import h3_session_watchdog as wd  # noqa: E402
 from h3_session_watchdog import (  # noqa: E402
+    SessionQueryError,
+    SessionState,
     load_managed_sessions,
     record_session,
     reconcile_on_startup,
@@ -108,7 +110,8 @@ class WatchReadyFileTest(unittest.TestCase):
             with mock.patch.object(wd, "load_managed_sessions", return_value=stored), \
                     mock.patch.object(wd, "mark_session_stopped"), \
                     mock.patch.object(wd, "LEDGER_PATH", ledger), \
-                    mock.patch.object(wd, "session_still_active", return_value=False), \
+                    mock.patch.object(wd, "query_session_state",
+                                      return_value=SessionState.STOPPED), \
                     mock.patch("auth_support.resolve_colab_executable", return_value="/usr/bin/colab"):
                 rc = watch("muse-h3-abc", production_task_id="h3-ab-20261112", ready_path=ready)
             self.assertEqual(rc, 0)
@@ -160,7 +163,8 @@ class ReconcileDetailTest(unittest.TestCase):
             stored[0]["started_at_utc"] = _iso(started)
             from h3_session_watchdog import save_managed_sessions
             save_managed_sessions(stored, path=state)
-            with mock.patch.object(wd, "session_still_active", return_value=True), \
+            with mock.patch.object(wd, "query_session_state",
+                                   return_value=SessionState.ACTIVE), \
                     mock.patch("h3_budget.read_live_usage",
                                return_value={"balance": 160.0, "rate": 8.88}):
                 out = reconcile_on_startup("adc", path=state)
@@ -177,9 +181,9 @@ class ReconcileDetailTest(unittest.TestCase):
             state = Path(d) / "sessions.json"
             record_session("muse-h3-abc", "G4", "run-1", _iso(BASE + datetime.timedelta(hours=1)),
                            path=state, production_task_id="h3-ab-20261112")
-            with mock.patch.object(wd, "session_still_active",
-                                   side_effect=RuntimeError("colab CLI down")):
-                with self.assertRaises(RuntimeError):
+            with mock.patch.object(wd, "query_session_state",
+                                   return_value=SessionState.UNKNOWN):
+                with self.assertRaises(SessionQueryError):
                     reconcile_on_startup("adc", path=state)
 
 

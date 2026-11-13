@@ -745,19 +745,40 @@ def deliver_variant_to_drive(variant: str, run_id: str, video_info: dict,
 
 
 def stop_and_verify_session(session: str) -> dict:
+    """Stop a managed session and verify it is gone. The stop verdict
+    comes only from the three-state query (TASK-005 §3, Issue #24):
+    STOPPED = confirmed gone; ACTIVE = still there, retry the stop;
+    UNKNOWN = cannot confirm — record a stop_error, retry bounded, and
+    never report stopped_confirmed. Balance/rate for the audit record is
+    best-effort and never decides the verdict."""
+    from h3_session_watchdog import SessionState, query_session_state
+
     stop_ok = False
     for attempt in range(3):
         try:
-            live_before = inspect()
-            if not any(s["name"] == session for s in live_before["sessions"]):
+            state = query_session_state(session)
+            if state is SessionState.STOPPED:
                 stop_ok = True
                 break
+            if state is SessionState.UNKNOWN:
+                record({"event": "stop_error", "session": session, "attempt": attempt + 1,
+                        "error": "session state UNKNOWN after stop query; not treating as stopped"})
+                time.sleep(3)
+                continue
             run_cli(["stop", "-s", session], timeout=65)
-            live = inspect()
-            if not any(s["name"] == session for s in live["sessions"]):
+            state = query_session_state(session)
+            if state is SessionState.STOPPED:
                 stop_ok = True
-                record({"event": "stopped", "session": session, "balance": live["cu_balance"], "rate": live["rate"]})
+                try:
+                    live = read_live_usage(_COLAB_AUTH)
+                    record({"event": "stopped", "session": session,
+                            "balance": live.get("balance"), "rate": live.get("rate")})
+                except Exception:  # noqa: BLE001 - audit record is best-effort
+                    record({"event": "stopped", "session": session})
                 break
+            if state is SessionState.UNKNOWN:
+                record({"event": "stop_error", "session": session, "attempt": attempt + 1,
+                        "error": "session state UNKNOWN after stop; not treating as stopped"})
         except Exception as e:  # noqa: BLE001
             record({"event": "stop_error", "session": session, "attempt": attempt + 1, "error": str(e)[-250:]})
         time.sleep(3)

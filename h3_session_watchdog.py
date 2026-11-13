@@ -17,10 +17,12 @@ import argparse
 import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import time
+from enum import Enum
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -144,17 +146,129 @@ def _run_colab(args: list, colab_auth: str = "adc", timeout: int = 65):
     return p
 
 
-def session_still_active(session_id: str, colab_auth: str = "adc") -> bool:
-    p = _run_colab(["sessions"], colab_auth=colab_auth)
-    text = p.stdout + "\n" + p.stderr
-    return session_id in text and "No active sessions" not in text
+class SessionState(Enum):
+    """Three-state answer to 'is this managed GPU session still there?'.
+
+    TASK-005 §3 (Issue #24): the old boolean `session_still_active()`
+    used substring matching and never checked the CLI exit code, so a
+    failed `colab sessions` call (empty output) was misread as 'session
+    gone' — a false STOPPED that could leave a GPU billing while the
+    controller reported a confirmed stop. Every caller must handle
+    UNKNOWN explicitly and fail closed.
+    """
+
+    ACTIVE = "ACTIVE"
+    STOPPED = "STOPPED"
+    UNKNOWN = "UNKNOWN"
+
+
+class SessionQueryError(RuntimeError):
+    """Raised when a managed session's state cannot be confirmed and the
+    caller must fail closed (e.g. reconcile before a new allocation)."""
+
+
+# Canonical `colab sessions` (official CLI 0.7.5) line, e.g.
+#   [muse-h3-e76302ae4b] gpu-a100-hm-euw4a0-wnsvovi8whof | Hardware: A100 | Shape: High-RAM | Variant: GPU
+# Kept local (not imported from reference_v2.colab_manager) so this
+# watchdog stays self-contained as an independent safety process.
+_SESSION_LINE_RE = re.compile(
+    r"^\[(?P<name>[^\]]+)\]\s+(?P<endpoint>\S+)\s*\|\s*Hardware:\s*(?P<hw>[^|\s]+)"
+)
+_NO_SESSIONS_MARKERS = ("no active sessions", "no sessions found", "0 active sessions")
+
+
+def _strip_cli_notice(text: str) -> str:
+    """Drop the Colab CLI's intermittent update-check notice (same filter
+    as h3_controller._strip_cli_notice; duplicated so the watchdog does
+    not import the controller)."""
+    return "\n".join(
+        line for line in (text or "").splitlines()
+        if "new version of Colab CLI" not in line
+        and "colab update" not in line
+        and "enable_update_check" not in line
+    )
+
+
+def _strict_session_names(text: str) -> list | None:
+    """Parse `colab sessions` output strictly. Returns the session names
+    from a JSON list or 0.7.5-format lines, or None when the output
+    contains content lines in no recognised form (format change -> the
+    caller must treat the state as UNKNOWN, never guess). An empty list
+    means the server explicitly reported no active sessions."""
+    cleaned = _strip_cli_notice(text).strip()
+    if not cleaned:
+        return None
+    if cleaned.startswith("[") and cleaned.endswith("]"):
+        try:
+            items = json.loads(cleaned)
+        except (ValueError, TypeError):
+            return None
+        if isinstance(items, list):
+            names: list = []
+            for item in items:
+                if isinstance(item, dict):
+                    sid = str(item.get("name") or item.get("session") or item.get("id") or "").strip()
+                    if sid:
+                        names.append(sid)
+            return names
+        return None
+    names = []
+    recognised = False
+    for line in cleaned.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        low = s.lower()
+        if any(m in low for m in _NO_SESSIONS_MARKERS):
+            recognised = True
+            continue
+        if s.startswith("[colab]"):
+            # Informational CLI lines, not sessions.
+            recognised = True
+            continue
+        m = _SESSION_LINE_RE.match(s)
+        if m:
+            recognised = True
+            names.append(m.group("name").strip())
+            continue
+        # Any other content line is an unrecognised format: do not guess.
+        return None
+    return names if recognised else None
+
+
+def query_session_state(session_id: str, colab_auth: str = "adc") -> SessionState:
+    """Three-state session query (TASK-005 §3, Issue #24).
+
+    ACTIVE: a reliably parsed server response explicitly lists this exact
+    session id (exact match, never substring).
+    STOPPED: a reliably parsed response explicitly says there are no
+    active sessions, or lists sessions without this id.
+    UNKNOWN: CLI nonzero exit, auth failure, timeout, empty output,
+    unparseable output, or an incompatible output format. Callers must
+    fail closed on UNKNOWN — never treat it as STOPPED.
+    """
+    try:
+        p = _run_colab(["sessions"], colab_auth=colab_auth)
+    except Exception:  # noqa: BLE001 - timeout / missing CLI / spawn failure
+        return SessionState.UNKNOWN
+    if p.returncode != 0:
+        return SessionState.UNKNOWN
+    text = (p.stdout or "") + "\n" + (p.stderr or "")
+    names = _strict_session_names(text)
+    if names is None:
+        return SessionState.UNKNOWN
+    return SessionState.ACTIVE if session_id in names else SessionState.STOPPED
 
 
 def stop_session(session_id: str, colab_auth: str = "adc") -> bool:
+    """Stop a managed session and confirm it is gone. Returns True only
+    when a reliable re-query reports STOPPED. A query that returns
+    UNKNOWN never counts as confirmed (TASK-005 §3). The structured
+    stop contract (bounded confirmation + escalation) is Issue #25."""
     for _ in range(3):
         _run_colab(["stop", "-s", session_id], colab_auth=colab_auth, timeout=65)
         time.sleep(3)
-        if not session_still_active(session_id, colab_auth=colab_auth):
+        if query_session_state(session_id, colab_auth=colab_auth) is SessionState.STOPPED:
             return True
     return False
 
@@ -165,8 +279,9 @@ def reconcile_on_startup(colab_auth: str = "adc", path: Path = STATE_PATH) -> di
     Each active session is reported with its run/task/deadline and a
     best-effort unbilled-cost estimate (None when the live rate cannot be
     read — the cost is then unconfirmable, but the session still blocks).
-    A failure to query the live session list propagates: an unconfirmable
-    session state must fail closed, never silently allow a parallel GPU."""
+    A session whose state cannot be confirmed (UNKNOWN) raises
+    SessionQueryError: an unconfirmable session state must fail closed,
+    never silently allow a parallel GPU."""
     sessions = [s for s in load_managed_sessions(path) if s.get("status") == "active"]
     rate = None
     try:
@@ -179,7 +294,12 @@ def reconcile_on_startup(colab_auth: str = "adc", path: Path = STATE_PATH) -> di
     still = []
     detail = []
     for s in sessions:
-        if session_still_active(s["session_id"], colab_auth=colab_auth):
+        state = query_session_state(s["session_id"], colab_auth=colab_auth)
+        if state is SessionState.UNKNOWN:
+            raise SessionQueryError(
+                f"cannot confirm state of managed session {s['session_id']} "
+                f"(run {s.get('run_id')}); failing closed: refusing to allocate a new GPU")
+        if state is SessionState.ACTIVE:
             still.append(s["session_id"])
             est = None
             if rate is not None:
@@ -262,10 +382,18 @@ def watch(session_id: str, colab_auth: str = "adc", poll_sec: int = 60,
         if rec.get("status") != "active":
             print(f"watchdog: {session_id} already {rec.get('status')}")
             return 0
-        if not session_still_active(session_id, colab_auth=colab_auth):
+        state = query_session_state(session_id, colab_auth=colab_auth)
+        if state is SessionState.STOPPED:
             mark_session_stopped(session_id)
             print(f"watchdog: {session_id} already gone")
             return 0
+        if state is SessionState.UNKNOWN:
+            # Transient CLI/network failure: do NOT mark the session
+            # stopped. Fall through to the deadline / hard-stop check
+            # below (record-local, needs no CLI); the deadline still
+            # bounds this watch, and an unconfirmed stop escalates.
+            print(f"watchdog: cannot confirm state of {session_id} (UNKNOWN); "
+                  "continuing to poll; the deadline still bounds this watch", flush=True)
         try:
             live = read_live_usage(colab_auth)
             balance = live.get("balance")
