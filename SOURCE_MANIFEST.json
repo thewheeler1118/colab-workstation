@@ -191,8 +191,8 @@
     },
     {
       "path": "docs/execution_flow.md",
-      "size_bytes": 11406,
-      "sha256": "2b73d5a755bd40cde6e92b577670f0abf683fd93bf0595e9cd78eb42b3ad5194",
+      "size_bytes": 11644,
+      "sha256": "b8a17036c6369be58c9475b53b5afac593818edf68d816996c8d63b642695c76",
       "role": "Documentation / evidence"
     },
     {
@@ -413,8 +413,8 @@
     },
     {
       "path": "docs/module_inventory.md",
-      "size_bytes": 41155,
-      "sha256": "53d010c555089aa3ae9dc5171b9e5526dae7c8d0786d3c9d356e68dbda7975b2",
+      "size_bytes": 42960,
+      "sha256": "bdbae4235306cc0bbbfe3320d8d849cd58dba887dec0dc98ee78d84b42e46345",
       "role": "Module inventory (this table's source of truth for hashes)"
     },
     {
@@ -445,6 +445,12 @@
       "path": "docs/research/google-colab-cli.md",
       "size_bytes": 628,
       "sha256": "d579882c1958ce89b09a213e0b03b69cd07f765f21bc5fa3430005489655d574",
+      "role": "Documentation / evidence"
+    },
+    {
+      "path": "docs/runbooks/independent-shutdown-cron.md",
+      "size_bytes": 4821,
+      "sha256": "45c7f49b37c607a94daa6ea6ee2d092ce6dc519aa2a2b4589a82a520be5b0f6c",
       "role": "Documentation / evidence"
     },
     {
@@ -497,8 +503,8 @@
     },
     {
       "path": "docs/watchdog_independence.md",
-      "size_bytes": 2695,
-      "sha256": "f67178ae2139d99b2d8f89c97504a97784052a005856d0ea41a36088331b15a8",
+      "size_bytes": 4307,
+      "sha256": "171bb162fb426b35924ed8f907d03e02435ed7320ddbcd34b33dc96942cbb3ec",
       "role": "Documentation / evidence"
     },
     {
@@ -557,8 +563,8 @@
     },
     {
       "path": "h3_controller.py",
-      "size_bytes": 122845,
-      "sha256": "9adb11c73a7c2b2c2e447be008da29e7b7ef40d67839818d3f847d212339674d",
+      "size_bytes": 126025,
+      "sha256": "d1a6de346026f62b14cdee462fad498902dda4af4c1f7ab1bf46aae3107f2b2b",
       "role": "Run orchestration: preflight, allocation, mount, worker exec, download, stop"
     },
     {
@@ -595,6 +601,12 @@
       "path": "h3_environment.py",
       "size_bytes": 13488,
       "sha256": "c7d5c1355687c7223574cf173c8cddde555c99c24690d3cf1594c8aa31b35e1b",
+      "role": "Supporting file"
+    },
+    {
+      "path": "h3_gpu_lease_registry.py",
+      "size_bytes": 25791,
+      "sha256": "7e6913dfe08940f55e7872aa376ad732b79cb17a1df8b9cdb4ef3ff914270376",
       "role": "Supporting file"
     },
     {
@@ -674,6 +686,12 @@
       "size_bytes": 27674,
       "sha256": "915802074acb7c592f0369349690d151daabec634c477b934963e4da3aa3c29e",
       "role": "Managed-session registry, deadline watchdog, stop + reconcile"
+    },
+    {
+      "path": "h3_shutdown_executor.py",
+      "size_bytes": 10868,
+      "sha256": "945d53f4d98a9fc01297a43a5e6b1459a3ce06a88e0a6548eb676a11ec61dab0",
+      "role": "Supporting file"
     },
     {
       "path": "h3_video_qa.py",
@@ -923,8 +941,8 @@
     },
     {
       "path": "tests/test_drive_delivery.py",
-      "size_bytes": 24451,
-      "sha256": "7f740f8b36298f346bf0d4d60872cf7fbc40449ed50efed3c32d372ed6ae8dcd",
+      "size_bytes": 24767,
+      "sha256": "9f615942133682fb4baecebede36b59e3150d0792741416d5b7212c19bd6977f",
       "role": "Tests"
     },
     {
@@ -965,8 +983,14 @@
     },
     {
       "path": "tests/test_fault_injection.py",
-      "size_bytes": 49719,
-      "sha256": "7ee2b4d0d68166a4d6c74298728205956c8201ec1a2ffcc4012de3a21fec53ac",
+      "size_bytes": 50035,
+      "sha256": "f6af129d44055c54e7810a94bae25c76b74217cca45d2ebf87227a71f1f9e8b6",
+      "role": "Tests"
+    },
+    {
+      "path": "tests/test_gpu_lease_registry.py",
+      "size_bytes": 13842,
+      "sha256": "58892452fc8f00b073ebccb9875c1d03b3f1359a6f4dd1df5daa60fb476d84cc",
       "role": "Tests"
     },
     {
@@ -977,14 +1001,14 @@
     },
     {
       "path": "tests/test_h3_mount_repair.py",
-      "size_bytes": 24648,
-      "sha256": "14b4cd79eb93486a8f66928c6a41c94eededa6246856159d54463f5e34e4251c",
+      "size_bytes": 24939,
+      "sha256": "7b318abe02da5d0558d6a769ea2bd91305e84b40f3a8180dc1833fed5558423a",
       "role": "Tests: mount repair, CLI patches, budget/watchdog/restore gates (31 tests)"
     },
     {
       "path": "tests/test_h3_production.py",
-      "size_bytes": 42210,
-      "sha256": "ab57703a82dd248b3d86801f7f88322ba30804b62a4472edadcd9c87db6262c6",
+      "size_bytes": 42378,
+      "sha256": "5ccdeb25de161826a95ec4ceac92efe80334517843648a885fffaba694c74119",
       "role": "Tests: production flow incl. worker marker, stop, parsers (63 tests)"
     },
     {
@@ -1019,14 +1043,20 @@
     },
     {
       "path": "tests/test_session_state_tristate.py",
-      "size_bytes": 13990,
-      "sha256": "7871c800a736799f792e29f8610534023a9834b4ba9c145da7c5cc82e0d011de",
+      "size_bytes": 14544,
+      "sha256": "f3d4edb8512c9dd8adcf75ed3b7aab75de7b741725711fae51b224ff91e0814f",
+      "role": "Tests"
+    },
+    {
+      "path": "tests/test_shutdown_executor.py",
+      "size_bytes": 9767,
+      "sha256": "d9673512dd78b17e0089184c0a03fdeef58f1af65503b46b96b10213ea93dcfd",
       "role": "Tests"
     },
     {
       "path": "tests/test_stop_state_hotfix.py",
-      "size_bytes": 31660,
-      "sha256": "ed066d518e990f149d20f9f08a539fe52cbb3a4bd8aacd54f5cd3d383e6bcb2d",
+      "size_bytes": 32507,
+      "sha256": "2b70b661dd121ad587e21f173d21a14c6f6131df82099f47e3a0dc89b0bdee5c",
       "role": "Tests"
     },
     {

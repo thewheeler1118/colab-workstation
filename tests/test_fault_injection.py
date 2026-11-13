@@ -207,6 +207,11 @@ class ChainHarness:
         self._po(hc, "_mint_and_upload_drive_token",
                  return_value={"token_id": "test-token-id",
                                "remote_path": "/content/muse_h3/drive_token.json"})
+        self._po(hc, "_register_gpu_lease",
+                 return_value={"session_id": "muse-h3-test",
+                               "version": 1, "deadline_final": False})
+        self._po(hc, "_update_gpu_lease_deadline", return_value=None)
+        self._po(hc, "_confirm_gpu_lease_stopped", return_value=None)
         self._po(hc, "initialize_project_budget",
                  return_value={"max_observed_spent_cu": 0.0,
                                "production_task_id": TASK,

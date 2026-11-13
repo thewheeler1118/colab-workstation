@@ -459,12 +459,14 @@ class ProductionTest(unittest.TestCase):
              mock.patch.object(h3_controller, "run_cli", fake_run_cli), \
              mock.patch.object(h3_controller, "record", lambda data: None), \
              mock.patch("h3_session_watchdog.mark_session_stopped") as marked, \
+             mock.patch.object(h3_controller, "_confirm_gpu_lease_stopped") as lease_confirmed, \
              mock.patch("h3_budget.read_live_usage",
                         return_value={"balance": 160.0, "rate": 0.0}):
             result = h3_controller.stop_and_verify_session("muse-h3-abc123")
             self.assertTrue(result["stopped_confirmed"])
             self.assertIn(["stop", "-s", "muse-h3-abc123"], calls)
             marked.assert_called_once_with("muse-h3-abc123", SessionState.STOPPED)
+            lease_confirmed.assert_called_once_with("muse-h3-abc123")
 
     def test_late_gpu_allocation_reconciled(self):
         # Watchdog reconcile must report a still-active managed session.

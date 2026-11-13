@@ -231,12 +231,14 @@ class ControllerStopTest(unittest.TestCase):
                         return_value=SessionState.STOPPED), \
                 mock.patch.object(hc, "run_cli") as run_cli, \
                 mock.patch.object(hc, "record"), \
+                mock.patch.object(hc, "_confirm_gpu_lease_stopped") as lease_confirmed, \
                 mock.patch("h3_session_watchdog.mark_session_stopped") as marked:
             out = hc.stop_and_verify_session(SID)
         self.assertTrue(out["stopped_confirmed"])
         self.assertEqual(out["state"], "STOPPED")
         run_cli.assert_not_called()
         marked.assert_called_once_with(SID, SessionState.STOPPED)
+        lease_confirmed.assert_called_once_with(SID)
 
     def test_active_then_stopped(self):
         with mock.patch("h3_session_watchdog.query_session_state",
@@ -247,6 +249,7 @@ class ControllerStopTest(unittest.TestCase):
                 mock.patch("h3_budget.read_live_usage",
                           return_value={"balance": 144.0, "rate": 0.0}), \
                 mock.patch("h3_session_watchdog.mark_session_stopped") as marked, \
+                mock.patch.object(hc, "_confirm_gpu_lease_stopped") as lease_confirmed, \
                 mock.patch("time.sleep"):
             out = hc.stop_and_verify_session(SID)
         self.assertTrue(out["stopped_confirmed"])
@@ -255,6 +258,7 @@ class ControllerStopTest(unittest.TestCase):
         events = [c.args[0]["event"] for c in rec.call_args_list]
         self.assertIn("stopped", events)
         marked.assert_called_once_with(SID, SessionState.STOPPED)
+        lease_confirmed.assert_called_once_with(SID)
 
     def test_unknown_never_confirms(self):
         with mock.patch("h3_session_watchdog.query_session_state",
@@ -262,12 +266,14 @@ class ControllerStopTest(unittest.TestCase):
                 mock.patch.object(hc, "run_cli") as run_cli, \
                 mock.patch.object(hc, "record") as rec, \
                 mock.patch("h3_session_watchdog.mark_session_stopped") as marked, \
+                mock.patch.object(hc, "_confirm_gpu_lease_stopped") as lease_confirmed, \
                 mock.patch("time.sleep"):
             out = hc.stop_and_verify_session(SID)
         self.assertFalse(out["stopped_confirmed"])
         self.assertEqual(out["state"], "UNKNOWN")
         run_cli.assert_not_called()
         marked.assert_not_called()
+        lease_confirmed.assert_not_called()
         events = [c.args[0]["event"] for c in rec.call_args_list]
         self.assertIn("CRITICAL_ORPHAN_RISK", events)
         self.assertEqual(events.count("stop_error"), 3)
@@ -279,11 +285,13 @@ class ControllerStopTest(unittest.TestCase):
                                   return_value={"returncode": 0}), \
                 mock.patch.object(hc, "record") as rec, \
                 mock.patch("h3_session_watchdog.mark_session_stopped") as marked, \
+                mock.patch.object(hc, "_confirm_gpu_lease_stopped") as lease_confirmed, \
                 mock.patch("time.sleep"):
             out = hc.stop_and_verify_session(SID)
         self.assertFalse(out["stopped_confirmed"])
         self.assertEqual(out["state"], "ACTIVE")
         marked.assert_not_called()
+        lease_confirmed.assert_not_called()
         events = [c.args[0]["event"] for c in rec.call_args_list]
         self.assertIn("CRITICAL_ORPHAN_RISK", events)
 
