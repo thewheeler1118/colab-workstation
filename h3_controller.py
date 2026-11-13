@@ -835,6 +835,60 @@ def _wait_watchdog_ready(proc, ready_path: Path, session: str, production_task_i
         f"within {timeout_sec:g}s")
 
 
+def _manifest_update(run_id: str, **kwargs) -> None:
+    """Best-effort durable-manifest update (TASK-005 §4.1). Never raises
+    into the run: the manifest is observability, and GPU/budget safety
+    never depends on it. A failure is recorded as a manifest_error event."""
+    try:
+        from h3_run_manifest import update_run
+
+        update_run(ROOT, run_id, **kwargs)
+    except Exception as e:  # noqa: BLE001 - manifest must not break the run
+        try:
+            record({"event": "manifest_error", "run_id": run_id, "error": str(e)[:300]})
+        except Exception:
+            pass
+
+
+def _manifest_create(args, ledger) -> None:
+    """Best-effort manifest creation at task authorization (TASK-005
+    §4.1). Never raises into the run."""
+    try:
+        import hashlib
+        import subprocess
+
+        from h3_run_manifest import create_run_manifest
+
+        try:
+            code_commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=str(ROOT),
+                capture_output=True, text=True, timeout=10).stdout.strip()
+        except Exception:
+            code_commit = ""
+
+        def _sha(path):
+            try:
+                return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            except Exception:
+                return ""
+
+        budget = {}
+        if ledger:
+            budget = {"project_budget_cu": ledger.get("project_budget_cu"),
+                      "spent_cu": ledger.get("max_observed_spent_cu"),
+                      "hard_stop_balance_cu": ledger.get("hard_stop_balance_cu")}
+        create_run_manifest(ROOT, args.production_task_id, args.run_id,
+                            variant=args.variant, code_commit=code_commit,
+                            workflow_sha256=_sha(args.workflow_api),
+                            model_manifest_sha256=_sha(args.cache_manifest),
+                            budget=budget)
+    except Exception as e:  # noqa: BLE001
+        try:
+            record({"event": "manifest_error", "run_id": args.run_id, "error": str(e)[:300]})
+        except Exception:
+            pass
+
+
 def run_variant(args) -> dict:
     global _EXEC_LOG_DIR, LEDGER_PATH, PRODUCTION_TASK_ID
     variant = args.variant
@@ -879,6 +933,9 @@ def run_variant(args) -> dict:
                                        prior_unbilled_reserve_cu=getattr(args, "prior_unbilled_reserve_cu",
                                                                          PRIOR_TASK_UNBILLED_RESERVE_CU),
                                        authorize_new_task=getattr(args, "authorize_new_task", False))
+    # Durable run manifest (TASK-005 §4.1): the task is authorised here,
+    # so the persistent record starts now and survives a controller restart.
+    _manifest_create(args, ledger)
     pre = inspect()
     if pre["cu_balance"] is None:
         raise RuntimeError("Cannot parse CU balance; abort")
@@ -972,6 +1029,8 @@ def run_variant(args) -> dict:
                 raise RuntimeError(f"GPU allocation failed ({chosen_key}): {str(e)[:500]}; no fallback unless capacity failure")
             created = True
             record({"event": "allocated", "session": session, "gpu": chosen_key})
+            _manifest_update(args.run_id, task_state="GPU_ALLOCATED",
+                             session_id=session, session_state="ACTIVE")
             break
         if not created or session is None:
             raise RuntimeError("GPU allocation did not complete")
@@ -1087,6 +1146,7 @@ def run_variant(args) -> dict:
             task_path = RUNS / f"task_{session}.json"
             task_path.write_text(json.dumps(task))
             run_cli(["upload", "-s", session, str(task_path), REMOTE + "/task.json"], timeout=120)
+            _manifest_update(args.run_id, task_state="WORKER_STARTED", heartbeat=True)
             worker_result = exec_script(session, ROOT / "h3_remote_worker.py", timeout=max(120, int(budget_sec - elapsed)))
             persist_exec_result(run_dir, f"worker_{variant}", worker_result)
             # Fail closed on the worker's own success marker: `colab exec`
@@ -1100,6 +1160,8 @@ def run_variant(args) -> dict:
                 download_remote_comfyui_log(session, run_dir)
                 raise
             record({"event": "worker_done", "variant": variant, "session": session, "done": done_info})
+            _manifest_update(args.run_id, task_state="INFERENCE_COMPLETED",
+                             last_verified_stage="INFERENCE_COMPLETED")
             record({"event": "delivery_state", "variant": variant, "run_id": args.run_id, "state": "INFERENCE_COMPLETED"})
             # Independent remote verification of the real MP4 BEFORE any
             # download: the file must exist and ffprobe must read exactly
@@ -1117,6 +1179,13 @@ def run_variant(args) -> dict:
             except Exception:
                 pass
             info = download_and_validate_variant(session, variant, args.run_id)
+            _manifest_update(args.run_id, task_state="VIDEO_VALIDATED",
+                             last_verified_stage="VIDEO_VALIDATED",
+                             artifacts={"local_sha256": info["sha256"],
+                                        "local_frames": info["frame_count"]})
+            # The local MP4 is now on Muse-controlled persistent storage:
+            # the artifact is durable before the GPU stop (TASK-005 §5).
+            _manifest_update(args.run_id, task_state="ARTIFACT_DURABLE")
             record({"event": "version_downloaded", "variant": variant, "session": session, "sha256": info["sha256"], "frames": info["frame_count"]})
             record({"event": "delivery_state", "variant": variant, "run_id": args.run_id,
                     "state": "LOCAL_MP4_DOWNLOADED"})
@@ -1142,6 +1211,10 @@ def run_variant(args) -> dict:
                     pass
             _EXEC_LOG_DIR = None
     finally:
+        # Capture the propagating exception FIRST: sys.exc_info() must be
+        # read before any call below (stop_and_verify_session catches its
+        # own errors internally).
+        _exc = sys.exc_info()
         if allocation_attempted and session is not None:
             stop_result = stop_and_verify_session(session)
             stop_ok = stop_result["stopped_confirmed"]
@@ -1153,6 +1226,21 @@ def run_variant(args) -> dict:
                 pass
             record({"event": "finished", "session": session, "variant": variant, "stop_verified": stop_ok,
                     "allocation_attempted": allocation_attempted, "elapsed_sec": round(time.monotonic() - start, 1)})
+            # Durable manifest terminal update for the GPU phase (TASK-005
+            # §4.1): on the success path this records GPU_STOP_CONFIRMED;
+            # on any failure path it records FAILED with the real error.
+            # The Drive tail below runs only after this finally.
+            if _exc[0] is not None:
+                _manifest_update(args.run_id, task_state="FAILED",
+                                 session_state="STOPPED" if stop_ok else "UNKNOWN",
+                                 last_error=f"{_exc[0].__name__}: {_exc[1]}"[:500])
+            elif stop_ok:
+                _manifest_update(args.run_id, task_state="GPU_STOP_CONFIRMED",
+                                 session_state="STOPPED")
+            else:
+                _manifest_update(args.run_id, task_state="FAILED",
+                                 session_state="UNKNOWN",
+                                 last_error="Stop not verified; run FAILED regardless of generated files")
     if allocation_attempted and not created:
         raise RuntimeError("GPU allocation did not complete; repeated session checks found no allocation, but delayed assignment remains possible. Recheck sessions later.")
     if not stop_ok:
@@ -1168,8 +1256,20 @@ def run_variant(args) -> dict:
     # burns no CU. Bounded retries inside deliver_variant_to_drive; on
     # failure the local MP4 is preserved and the error directs an
     # archive-only retry — never a re-run of the inference.
-    delivery = deliver_variant_to_drive(variant, production_result["run_id"], production_result["video"])
+    try:
+        delivery = deliver_variant_to_drive(variant, production_result["run_id"], production_result["video"])
+    except Exception as e:
+        # The video is durable locally; the terminal state is
+        # COMPLETED_AWAITING_ARCHIVE (archive-only retry), not FAILED.
+        _manifest_update(args.run_id, task_state="COMPLETED_AWAITING_ARCHIVE",
+                         last_error=str(e)[:500])
+        raise
     production_result["delivery"] = delivery
+    _manifest_update(args.run_id, task_state="DRIVE_VERIFIED",
+                     last_verified_stage="DRIVE_VERIFIED",
+                     artifacts={"drive_file_id": delivery.get("drive_file_id"),
+                                "drive_output_folder_id": delivery.get("drive_output_folder_id")})
+    _manifest_update(args.run_id, task_state="TASK_COMPLETED")
     return production_result
 
 
@@ -1204,6 +1304,16 @@ def test_or_run(args):
         delivery = deliver_variant_to_drive(args.variant, args.run_id, info)
         print(json.dumps(delivery, ensure_ascii=False, indent=2))
         return delivery
+    if args.action == "status":
+        # TASK-005 §4.1: read-only recovery view for a run. Never writes
+        # (does not bump recovery_generation); resume is a separate
+        # operation (PR-4).
+        from h3_run_manifest import recovery_view
+
+        if not args.run_id:
+            raise ValueError("--run-id is required for status")
+        print(json.dumps(recovery_view(ROOT, args.run_id), ensure_ascii=False, indent=2))
+        return
     if args.action != "run":
         raise ValueError("Unknown action")
     result = run_variant(args)
@@ -1213,7 +1323,7 @@ def test_or_run(args):
 def main():
     global _COLAB_AUTH, PRODUCTION_TASK_ID, LEDGER_PATH, PRIOR_TASK_UNBILLED_RESERVE_CU
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["plan", "check", "run", "preflight", "archive"])
+    parser.add_argument("action", choices=["plan", "check", "run", "preflight", "archive", "status"])
     parser.add_argument("--colab-auth", choices=("oauth2", "adc"), default="adc")
     parser.add_argument("--workflow-api", default=str(ROOT / "workflow_api.json"))
     parser.add_argument("--cache-manifest", default=str(ROOT / "model_cache" / "verified_manifest.json"))
@@ -1272,6 +1382,18 @@ def main():
                                ensure_ascii=False, indent=2), encoding="utf-8")
             except Exception:
                 pass
+            # Durable manifest: a run that failed before run_variant's own
+            # finally (e.g. preflight/authorization) still gets its FAILED
+            # terminal state, so a later `status` does not show it as
+            # healthy-but-incomplete. Best-effort; never masks the error.
+            if a.action == "run":
+                try:
+                    from h3_run_manifest import update_run
+
+                    update_run(ROOT, a.run_id, task_state="FAILED",
+                               last_error=f"{type(e).__name__}: {e}"[:500])
+                except Exception:
+                    pass
         print("ERROR:", str(e), file=sys.stderr)
         sys.exit(1)
 

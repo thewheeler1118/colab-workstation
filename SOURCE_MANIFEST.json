@@ -413,8 +413,8 @@
     },
     {
       "path": "docs/module_inventory.md",
-      "size_bytes": 31473,
-      "sha256": "d08f5759a78e2178bcc391717c3ccbb05126c96b638af55c89cfea77de70e68b",
+      "size_bytes": 32265,
+      "sha256": "9c8411dcd799a93a9796b3fee1f6d0c5efe7482a386725354a77b301c77d4828",
       "role": "Module inventory (this table's source of truth for hashes)"
     },
     {
@@ -551,8 +551,8 @@
     },
     {
       "path": "h3_controller.py",
-      "size_bytes": 67499,
-      "sha256": "d84174ea9c74a370c06542473dc950d32536771c43019654a360e3cd4adbe46f",
+      "size_bytes": 73599,
+      "sha256": "f2ba0f42e8b81abc1da4256e3bc22a4a099ef36e28e64eaaf6ccae3e4459e0f3",
       "role": "Run orchestration: preflight, allocation, mount, worker exec, download, stop"
     },
     {
@@ -608,6 +608,12 @@
       "size_bytes": 1815,
       "sha256": "905a9d4d2e2b0a424e8b671ae45eff1651bab38a280681effb608be8ac6df8eb",
       "role": "Restore probe output parsing"
+    },
+    {
+      "path": "h3_run_manifest.py",
+      "size_bytes": 12698,
+      "sha256": "e134cb9753956151cd757e63541132889cdc1fcb08d18ada25e322c52dceb32c",
+      "role": "Supporting file"
     },
     {
       "path": "h3_session_watchdog.py",
@@ -839,8 +845,8 @@
     },
     {
       "path": "tests/test_drive_delivery.py",
-      "size_bytes": 18296,
-      "sha256": "c8e70c634e2540fb06afb2956fb81042e702ff107254ba8ee88328b88d788f32",
+      "size_bytes": 20257,
+      "sha256": "489ff56742d3182b57ed3f570c7ea4716f55d17fc210b810e1153b1cc441a74b",
       "role": "Tests"
     },
     {
@@ -877,6 +883,12 @@
       "path": "tests/test_h3_video_qa.py",
       "size_bytes": 5299,
       "sha256": "d992f59a9f6f95cbb73f4377b8191584402e61f47b1d6f86ca6d2f2d9854f94d",
+      "role": "Tests"
+    },
+    {
+      "path": "tests/test_run_manifest.py",
+      "size_bytes": 10289,
+      "sha256": "29e7f118d48e82ea78cfa1928217d91bcf275d78ae630859824360967653e101",
       "role": "Tests"
     },
     {

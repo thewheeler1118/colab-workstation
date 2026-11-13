@@ -208,6 +208,9 @@ class RunVariantDeliveryTest(unittest.TestCase):
         self.patchers = {}
         self._po(hc, "OUTPUT_ROOT", self.out_root)
         self._po(hc, "RUNS", self.runs_root)
+        # TASK-005 §4.1: the durable run manifest must land in this test's
+        # temp dir, not in the real repo's model_cache.
+        self._po(hc, "ROOT", Path(self.tmp.name))
         self._po(hc, "record", lambda data: self.events.append(data))
         self._po(hc.time, "sleep", lambda s: None)
         self._po(hc, "validate_local")
@@ -286,6 +289,11 @@ class RunVariantDeliveryTest(unittest.TestCase):
     def _deliver_calls(self):
         return [c for c in self.calls if c[0] == "deliver"]
 
+    def _manifest(self):
+        from h3_run_manifest import load_run_manifest, read_audit_log
+        return (load_run_manifest(Path(self.tmp.name), RUN_ID),
+                read_audit_log(Path(self.tmp.name), RUN_ID))
+
     def test_success_delivers_original_run_id_and_video_after_stop(self):
         result = hc.run_variant(_args())
         # 1. stop_and_verify_session() was called, once, for our session.
@@ -306,6 +314,22 @@ class RunVariantDeliveryTest(unittest.TestCase):
         self.assertEqual(result["video"]["sha256"], self.sha)
         self.assertEqual(result["delivery"]["state"], "DELIVERY_COMPLETED")
         self.assertEqual(result["delivery"]["drive_file_id"], "drive-file-1")
+        # 5. TASK-005 §4.1: the durable manifest records the full run.
+        manifest, audit = self._manifest()
+        self.assertEqual(manifest["task_state"], "TASK_COMPLETED")
+        self.assertEqual(manifest["session_state"], "STOPPED")
+        self.assertEqual(manifest["session_id"], SESSION)
+        self.assertEqual(manifest["production_task_id"], "h3-ab-20261111")
+        self.assertEqual(manifest["last_verified_stage"], "DRIVE_VERIFIED")
+        self.assertEqual(manifest["artifacts"]["drive_file_id"], "drive-file-1")
+        self.assertEqual(manifest["artifacts"]["local_sha256"], self.sha)
+        self.assertEqual(manifest["recovery_generation"], 0)
+        stages = [e["detail"].get("to") for e in audit
+                  if e["event"] == "STAGE"]
+        self.assertEqual(stages, ["GPU_ALLOCATED", "WORKER_STARTED",
+                                  "INFERENCE_COMPLETED", "VIDEO_VALIDATED",
+                                  "ARTIFACT_DURABLE", "GPU_STOP_CONFIRMED",
+                                  "DRIVE_VERIFIED", "TASK_COMPLETED"])
 
     def test_stop_not_confirmed_skips_delivery_and_fails(self):
         self.stop_ok = False
@@ -313,6 +337,9 @@ class RunVariantDeliveryTest(unittest.TestCase):
             hc.run_variant(_args())
         self.assertEqual(self._stop_calls(), [("stop", SESSION)])
         self.assertEqual(self._deliver_calls(), [])
+        manifest, _audit = self._manifest()
+        self.assertEqual(manifest["task_state"], "FAILED")
+        self.assertEqual(manifest["session_state"], "UNKNOWN")
 
     def test_drive_failure_preserves_local_mp4(self):
         # Use the REAL deliver helper with a failing archive function:
@@ -329,6 +356,11 @@ class RunVariantDeliveryTest(unittest.TestCase):
         self.assertEqual(archive.call_count, 3)  # bounded retries, then give up
         self.assertEqual(self._stop_calls(), [("stop", SESSION)])
         self.assertTrue(self.mp4.is_file())  # local MP4 preserved
+        # TASK-005 §4.1: the run is not FAILED — the video is durable
+        # locally, so the terminal state is COMPLETED_AWAITING_ARCHIVE.
+        manifest, _audit = self._manifest()
+        self.assertEqual(manifest["task_state"], "COMPLETED_AWAITING_ARCHIVE")
+        self.assertEqual(manifest["session_state"], "STOPPED")
 
     def test_watchdog_failure_still_stops_managed_gpu(self):
         self.mocks["watchdog"].side_effect = RuntimeError(
