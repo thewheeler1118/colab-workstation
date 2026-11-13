@@ -272,6 +272,9 @@ class _ResumeBase(unittest.TestCase):
         self._po(hc, "RUNS", self.root / "runs")
         self._po(hc, "record", lambda data: None)
         self._po(hc.time, "sleep", lambda s: None)
+        # TASK-005 §6: resume drives the same CLI, so the environment
+        # gate runs first; the mock lets the decision-tree tests proceed.
+        self._po(hc, "verify_environment", return_value={"ok": True, "checked": []})
         # git HEAD matches the manifest's code_commit by default.
         self._git("abc1234")
 

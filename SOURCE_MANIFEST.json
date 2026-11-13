@@ -413,8 +413,8 @@
     },
     {
       "path": "docs/module_inventory.md",
-      "size_bytes": 34094,
-      "sha256": "0fba0adb4a59b5af491647cb0bb5a2abb5a26be708c44ca09cc48f3943658f80",
+      "size_bytes": 35813,
+      "sha256": "2c35955cdb349ea05d9b1a7d9d015ad810b031bd2d4ae9c015d13201e3b661ce",
       "role": "Module inventory (this table's source of truth for hashes)"
     },
     {
@@ -520,6 +520,12 @@
       "role": "Resumable upload with 308/Range resume + empty-PUT 411 fallback"
     },
     {
+      "path": "environment_manifest.json",
+      "size_bytes": 1345,
+      "sha256": "b6d0c02160f57b68686c9965d9ec1f3ef01501f69338a4277959505dce598a4e",
+      "role": "Supporting file"
+    },
+    {
       "path": "examples/run_manifest.example.json",
       "size_bytes": 339,
       "sha256": "14ac868efeb3c4bd02370ab6e3619b18371466435ad23effe9b15a359824b5bf",
@@ -545,14 +551,14 @@
     },
     {
       "path": "h3_contract.py",
-      "size_bytes": 8865,
-      "sha256": "20ad3c380bfdeae0f32ba5ef1fa15b1227603d9f3eebfc84d8d69cae304de369",
+      "size_bytes": 9257,
+      "sha256": "61645a5558f41dfcb8e6757daa32cf74f4dabda10debf5c7d71239f147912855",
       "role": "Video contract, A/B prompts, API workflow patch (pinned nodes)"
     },
     {
       "path": "h3_controller.py",
-      "size_bytes": 105816,
-      "sha256": "6af0488f49546b80f7248bc45391485c85430c749de62999b36b900c65a5948e",
+      "size_bytes": 107153,
+      "sha256": "f47471fae626377f56d99855795a5fccf1d404281ec244af9cc6acaa9e3ba5b8",
       "role": "Run orchestration: preflight, allocation, mount, worker exec, download, stop"
     },
     {
@@ -560,6 +566,12 @@
       "size_bytes": 1109,
       "sha256": "1b2b2ff4175073011a42a51bde8188fdf7ec9d5fc73b67750d1f40ecc956ef8a",
       "role": "Remote mounted-model visibility probe (4 files, exact sizes)"
+    },
+    {
+      "path": "h3_environment.py",
+      "size_bytes": 11786,
+      "sha256": "4f7cc7220452d3050b17d814557fccd96af8fb7c8573e4cd7ec36b1a5392de3e",
+      "role": "Supporting file"
     },
     {
       "path": "h3_gpu_probe.py",
@@ -760,6 +772,18 @@
       "role": "Operator wrapper / offline check"
     },
     {
+      "path": "scripts/generate_environment_manifest.py",
+      "size_bytes": 1673,
+      "sha256": "36a2820ecf90808ac4b183f72face865fd2df8c0128e0a12072317e45bec04fa",
+      "role": "Operator wrapper / offline check"
+    },
+    {
+      "path": "scripts/install_colab_cli.sh",
+      "size_bytes": 2934,
+      "sha256": "13535d7540bdcdfafffacc73cde4174864be77cca666a4eb20d8369c39c84b8c",
+      "role": "Operator wrapper / offline check"
+    },
+    {
       "path": "scripts/preflight.sh",
       "size_bytes": 553,
       "sha256": "1c6050513e4877c44232010359f73845299f886238f8c9a8dbbf0e56990f4aa0",
@@ -863,8 +887,8 @@
     },
     {
       "path": "tests/test_drive_delivery.py",
-      "size_bytes": 22230,
-      "sha256": "3d88f82d03f19eac07e90e315d530444bd0ebf2c3cc383844fb417a045d4308e",
+      "size_bytes": 23295,
+      "sha256": "35c7da44ffb08f60903d22f15427ab63ace8556c35afab407eb679a080242e85",
       "role": "Tests"
     },
     {
@@ -881,8 +905,14 @@
     },
     {
       "path": "tests/test_durable_artifact_delivery.py",
-      "size_bytes": 8849,
-      "sha256": "4bbb8775cf1d47aaf5f077fe2b924bcc0b3b74c32e70b5fcb068305aa8534227",
+      "size_bytes": 9126,
+      "sha256": "969463adf76330af185d9110ef2c4040c62ae0684c4eab9ef7cac421ee4e5dbc",
+      "role": "Tests"
+    },
+    {
+      "path": "tests/test_environment_contract.py",
+      "size_bytes": 9495,
+      "sha256": "97bb59755d7f999fd5ad1b5ec43c45a39811d32889ed74b4a9293e8e1179a9a0",
       "role": "Tests"
     },
     {
@@ -911,8 +941,8 @@
     },
     {
       "path": "tests/test_recoverable_controller.py",
-      "size_bytes": 30147,
-      "sha256": "a54d24a7ca555f4460ebf578781bf3887768568539a4b841feb8728bb7b0ca0b",
+      "size_bytes": 30377,
+      "sha256": "434dea407955e3073b9de26a911ebe947004c12ddf72f168089c46033b753ae1",
       "role": "Tests"
     },
     {

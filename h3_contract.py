@@ -10,6 +10,12 @@ from pathlib import Path
 POSTER_SHA256 = 'bd6d45312f340234d0fa06af0de5284949b2196f280677dd44468a300075c7bb'
 POSTER_DRIVE_ID = '1Punsy8qZKQktUcYyrNDpG46XMu_SWAJO'
 STORY_DRIVE_ID = '1TTv-xyLsSLSvTL1jy9ewOFM4qXUKBwpP'
+# Pinned Hugging Face revision of the four model files (CACHE_READY
+# 2026-11-10; READY manifest Drive ID 1jLYefARIDs8VLtsCXJPuTU7zHXw0coly).
+# Previously a bare literal in h3_controller.archive_variant_to_drive;
+# named here so the environment manifest and the upload path share one
+# source of truth (TASK-005 §6, Issue #29).
+MODEL_HF_REVISION = '54472221d27c695fca9621b0c3ed52f06c4af707'
 WIDTH, HEIGHT, FPS = 736, 1312, 24
 ANIMATION_FRAMES, POSTER_FRAMES = 226, 48
 TOTAL_FRAMES = ANIMATION_FRAMES + POSTER_FRAMES
