@@ -1027,10 +1027,64 @@ def stop_and_verify_session(session: str) -> dict:
             record_marked = mark_session_stopped(session, SessionState.STOPPED)
         except Exception:  # noqa: BLE001 - marking is best-effort, never overturns a confirmed stop
             record_marked = False
+        _confirm_gpu_lease_stopped(session)
     if not stop_ok:
         record({"event": "CRITICAL_ORPHAN_RISK", "session": session})
     return {"session": session, "stopped_confirmed": stop_ok, "state": last_state.value,
             "record_marked": record_marked}
+
+
+def _lease_registry():
+    """Lease registry with the Drive mirror (TASK-006 P0-C). The Drive
+    service is built lazily inside the mirror backend, so constructing
+    the registry never needs google libs up front."""
+    from h3_gpu_lease_registry import DriveMirrorBackend, LeaseRegistry
+
+    return LeaseRegistry(mirror=DriveMirrorBackend())
+
+
+def _register_gpu_lease(session: str, gpu_model: str, run_id: str,
+                        production_task_id: str, stop_deadline_utc: str,
+                        budget_cap_cu: float) -> dict:
+    """Register the lease for a just-allocated session (TASK-006 P0-C).
+    Raises on local registry failure: the caller lets the exception
+    propagate so the outer finally stops the session — an unregistered
+    lease is invisible to the backup executor, so the run must not
+    proceed. The mirror write is best-effort inside register_lease."""
+    from h3_gpu_lease_registry import current_owner_id
+
+    registry = _lease_registry()
+    return registry.register_lease(
+        session, run_id, production_task_id, gpu_model,
+        stop_deadline_utc, budget_cap_cu, current_owner_id())
+
+
+def _update_gpu_lease_deadline(session: str, stop_deadline_utc: str) -> None:
+    """Best-effort lease deadline finalisation, 3 attempts (TASK-006
+    P0-C). On failure records an audit event and returns: the lease
+    stays non-final and the backup executor will never stop it."""
+    registry = _lease_registry()
+    for attempt in range(3):
+        try:
+            registry.update_deadline(session, stop_deadline_utc, final=True)
+            return
+        except Exception:  # noqa: BLE001 - retried, then recorded
+            if attempt < 2:
+                time.sleep(2)
+    record({"event": "lease_deadline_sync_failed", "session": session,
+            "deadline_utc": stop_deadline_utc})
+
+
+def _confirm_gpu_lease_stopped(session: str) -> None:
+    """Best-effort: mark the lease stopped after a confirmed stop
+    (TASK-006 P0-C). Never raises; a failure is an audit event only —
+    the confirmed stop stands, and reconcile repairs the lease from
+    live evidence."""
+    try:
+        _lease_registry().confirm_stopped(session, "STOPPED")
+    except Exception as e:  # noqa: BLE001 - marking is best-effort only
+        record({"event": "lease_confirm_failed", "session": session,
+                "error": type(e).__name__})
 
 
 def reconcile_run_state(run_id: str) -> dict:
@@ -1884,6 +1938,13 @@ def run_variant(args) -> dict:
 
         session_rec = record_session(session, chosen_key, args.run_id, deadline.isoformat(),
                                      production_task_id=args.production_task_id)
+        # TASK-006 P0-C: register the lease for the backup executor.
+        # Raises on local registry failure -> the exception propagates
+        # to the outer finally, which stops the just-created session
+        # (an unregistered lease is invisible to the backup executor).
+        _register_gpu_lease(session, chosen_key, args.run_id,
+                            args.production_task_id, deadline.isoformat(),
+                            args.per_session_budget_cu)
         # Fail-closed watchdog startup (TASK-002 §6.1): the watcher must
         # prove it is alive, holding this session's record, and bound to
         # this task before any inference. On any startup failure the
@@ -1939,6 +2000,10 @@ def run_variant(args) -> dict:
 
             new_deadline = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=budget_sec)
             update_session_deadline(session, new_deadline.isoformat())
+            # TASK-006 P0-C: finalise the lease deadline for the backup
+            # executor (best-effort; a failed finalisation leaves the
+            # lease non-final and the executor will never stop it).
+            _update_gpu_lease_deadline(session, new_deadline.isoformat())
             record({"event": "watchdog_deadline_updated", "session": session,
                     "budget_sec": budget_sec, "rate_cu_h": live["rate"],
                     "deadline_utc": new_deadline.isoformat()})

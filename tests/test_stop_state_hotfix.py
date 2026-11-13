@@ -167,13 +167,16 @@ class StopAndVerifyMarksOnlyOnConfirmedTest(unittest.TestCase):
     def _run_stop(self, query_states, run_cli_side_effect=None):
         """Run the real stop_and_verify_session against a temp state file
         with scripted session queries. Returns (result, stored_record,
-        run_cli_mock, events)."""
+        run_cli_mock, events, lease_confirmed_mock). The lease confirm is
+        mocked (TASK-006 P0-C) so the test never touches the real
+        registry file."""
         tmp = tempfile.TemporaryDirectory()
         state = Path(tmp.name) / "sessions.json"
         record_session(SID, "G4", "run-1", _deadline(), path=state,
                        production_task_id=TASK)
         real_mark = hwd.mark_session_stopped
         events = []
+        lease_confirmed = mock.Mock()
         patches = [
             mock.patch.object(hwd, "mark_session_stopped",
                               side_effect=lambda sid, cs, path=None: real_mark(sid, cs, path=state)),
@@ -184,6 +187,7 @@ class StopAndVerifyMarksOnlyOnConfirmedTest(unittest.TestCase):
             mock.patch.object(hc, "read_live_usage",
                               return_value={"balance": 150.0, "rate": 5.0}),
             mock.patch.object(hc, "record", side_effect=lambda data: events.append(data)),
+            mock.patch.object(hc, "_confirm_gpu_lease_stopped", lease_confirmed),
             mock.patch.object(hc.time, "sleep", lambda s: None),
         ]
         for p in patches:
@@ -191,26 +195,27 @@ class StopAndVerifyMarksOnlyOnConfirmedTest(unittest.TestCase):
         try:
             result = hc.stop_and_verify_session(SID)
             stored = load_managed_sessions(path=state)[0]
-            return result, stored, events
+            return result, stored, events, lease_confirmed
         finally:
             for p in reversed(patches):
                 p.stop()
             tmp.cleanup()
 
     def test_stop_success_query_stopped_marks_record(self):
-        result, stored, _events = self._run_stop(
+        result, stored, _events, lease_confirmed = self._run_stop(
             [SessionState.ACTIVE, SessionState.STOPPED])
         self.assertTrue(result["stopped_confirmed"])
         self.assertEqual(result["state"], "STOPPED")
         self.assertTrue(result["record_marked"])
         self.assertEqual(stored["status"], "stopped")
         self.assertEqual(stored["version"], 2)
+        lease_confirmed.assert_called_once_with(SID)
 
     def test_stop_cli_zero_but_query_still_active_leaves_record(self):
         # The exact P0-A scenario: the stop CLI exits 0, but the session
         # is still there. The record must stay active and the run must
         # report the orphan risk — never a confirmed stop.
-        result, stored, events = self._run_stop(
+        result, stored, events, lease_confirmed = self._run_stop(
             [SessionState.ACTIVE] * 6)
         self.assertFalse(result["stopped_confirmed"])
         self.assertEqual(result["state"], "ACTIVE")
@@ -218,15 +223,17 @@ class StopAndVerifyMarksOnlyOnConfirmedTest(unittest.TestCase):
         self.assertEqual(stored["status"], "active")
         self.assertEqual(stored["version"], 1)
         self.assertTrue(any(e.get("event") == "CRITICAL_ORPHAN_RISK" for e in events))
+        lease_confirmed.assert_not_called()
 
     def test_stop_timeout_query_unknown_leaves_record(self):
-        result, stored, events = self._run_stop(
+        result, stored, events, lease_confirmed = self._run_stop(
             [SessionState.UNKNOWN] * 3)
         self.assertFalse(result["stopped_confirmed"])
         self.assertEqual(result["state"], "UNKNOWN")
         self.assertFalse(result["record_marked"])
         self.assertEqual(stored["status"], "active")
         self.assertTrue(any(e.get("event") == "CRITICAL_ORPHAN_RISK" for e in events))
+        lease_confirmed.assert_not_called()
 
     def test_stop_cli_fails_but_later_query_stopped_confirms_and_marks(self):
         # stop_session contract (TASK-005 §3): the CLI exit code is only
@@ -235,13 +242,14 @@ class StopAndVerifyMarksOnlyOnConfirmedTest(unittest.TestCase):
         def failing_cli(*args, **kwargs):
             raise RuntimeError("CLI failed: exit 1")
 
-        result, stored, _events = self._run_stop(
+        result, stored, _events, lease_confirmed = self._run_stop(
             [SessionState.ACTIVE, SessionState.STOPPED],
             run_cli_side_effect=failing_cli)
         self.assertTrue(result["stopped_confirmed"])
         self.assertEqual(result["state"], "STOPPED")
         self.assertTrue(result["record_marked"])
         self.assertEqual(stored["status"], "stopped")
+        lease_confirmed.assert_called_once_with(SID)
 
 
 class ConcurrencyTest(unittest.TestCase):
@@ -343,6 +351,11 @@ class _ChainHarness(unittest.TestCase):
         self._po(hc, "_mint_and_upload_drive_token",
                  return_value={"token_id": "test-token-id",
                                "remote_path": "/content/muse_h3/drive_token.json"})
+        self._po(hc, "_register_gpu_lease",
+                 return_value={"session_id": "muse-h3-test",
+                               "version": 1, "deadline_final": False})
+        self._po(hc, "_update_gpu_lease_deadline", return_value=None)
+        self._po(hc, "_confirm_gpu_lease_stopped", return_value=None)
         self._po(hc, "initialize_project_budget",
                  return_value={"max_observed_spent_cu": 0.0, "production_task_id": TASK})
         self._po(hc, "inspect",

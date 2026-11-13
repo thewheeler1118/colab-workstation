@@ -351,10 +351,12 @@ class VmRestartAndCleanupTest(unittest.TestCase):
              mock.patch("h3_controller.run_cli", return_value={}), \
              mock.patch("h3_controller.record"), \
              mock.patch("h3_session_watchdog.mark_session_stopped") as marked, \
+             mock.patch("h3_controller._confirm_gpu_lease_stopped") as lease_confirmed, \
              mock.patch("time.sleep"):
             result = stop_and_verify_session("muse-h3-abc1234")
         self.assertTrue(result["stopped_confirmed"])
         marked.assert_called_once_with("muse-h3-abc1234", SessionState.STOPPED)
+        lease_confirmed.assert_called_once_with("muse-h3-abc1234")
 
     def test_session_cleanup_orphan_risk_recorded(self):
         from h3_session_watchdog import SessionState
@@ -363,10 +365,12 @@ class VmRestartAndCleanupTest(unittest.TestCase):
              mock.patch("h3_controller.run_cli", return_value={}), \
              mock.patch("h3_controller.record") as record_mock, \
              mock.patch("h3_session_watchdog.mark_session_stopped") as marked, \
+             mock.patch("h3_controller._confirm_gpu_lease_stopped") as lease_confirmed, \
              mock.patch("time.sleep"):
             result = stop_and_verify_session("muse-h3-abc1234")
         self.assertFalse(result["stopped_confirmed"])
         marked.assert_not_called()
+        lease_confirmed.assert_not_called()
         events = [c.args[0].get("event") for c in record_mock.call_args_list if c.args]
         self.assertIn("CRITICAL_ORPHAN_RISK", events)
 
