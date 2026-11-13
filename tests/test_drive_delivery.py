@@ -235,9 +235,19 @@ class RunVariantDeliveryTest(unittest.TestCase):
                                "returncode": 0})
         self._po(hc, "check_mount_signature", return_value=True)
         self._po(hc, "mount_drive", return_value={})
-        self.mocks["worker_marker"] = self._po(
-            hc, "check_worker_done_marker",
-            return_value={"frames": 274, "file": "x.mp4"})
+        # TASK-005 §4.2: the worker now runs detached (launch + poll) —
+        # the old blocking exec + stdout DONE marker are gone. The poll
+        # loop is mocked at the wait_for_worker boundary so these tests
+        # keep asserting the run_variant delivery wiring, not the polling.
+        self._po(hc, "launch_worker",
+                 return_value={"run_id": RUN_ID, "variant": "A", "pid": 123,
+                               "state_file": "/content/muse_h3/MUSE_H3_JOB_STATE.json",
+                               "log_file": "/content/muse_h3/worker.log"})
+        self._po(hc, "wait_for_worker",
+                 return_value={"run_id": RUN_ID, "variant": "A", "stage": "VIDEO_READY",
+                               "output": {"file": "/content/muse_h3/output/shao_nian_h3_A.mp4",
+                                          "frames": 274, "sha256": self.sha,
+                                          "seconds": 274 / 24, "with_audio": True}})
         self._po(hc, "check_remote_output", return_value={"ok": True})
         self._po(hc, "download_and_validate_variant",
                  return_value=self.video_info)
@@ -371,12 +381,21 @@ class RunVariantDeliveryTest(unittest.TestCase):
         self.assertEqual(self._deliver_calls(), [])
 
     def test_worker_failure_propagates_original_error_and_stops_gpu(self):
-        self.mocks["worker_marker"].side_effect = RuntimeError(
-            "worker marker missing: no MUSE_H3_DONE_JSON")
-        with self.assertRaisesRegex(RuntimeError, "worker marker missing"):
+        # TASK-005 §4.2: the worker failure now surfaces from the poll
+        # loop (wait_for_worker raises on a FAILED job state), not from a
+        # missing stdout marker.
+        self.patchers["wait_for_worker"].stop()
+        self.patches.remove(self.patchers["wait_for_worker"])
+        self._po(hc, "wait_for_worker",
+                 side_effect=RuntimeError(
+                     "Remote worker failed at stage inference_submit: "
+                     "RuntimeError: /prompt rejected"))
+        with self.assertRaisesRegex(RuntimeError, "Remote worker failed at stage inference_submit"):
             hc.run_variant(_args())
         self.assertEqual(self._stop_calls(), [("stop", SESSION)])
         self.assertEqual(self._deliver_calls(), [])
+        manifest, _audit = self._manifest()
+        self.assertEqual(manifest["task_state"], "FAILED")
 
 
 class ArchiveActionTest(unittest.TestCase):
