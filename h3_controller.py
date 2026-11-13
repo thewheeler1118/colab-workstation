@@ -104,6 +104,132 @@ def _comfyui_cache_task():
     }
 
 
+def _comfyui_download_task():
+    """ComfyUI source-cache descriptor for the NONINTERACTIVE download
+    path (TASK-006 P0-B): Drive file ids from the same local manifest
+    _comfyui_cache_task reads, so the worker downloads the tarball
+    instead of reading it from a mount. None when the cache manifest
+    is missing or has no Drive ids: the worker then falls back to git
+    clone, exactly as on the mount path."""
+    manifest_path = ROOT / "model_cache" / "comfyui_source_manifest.json"
+    if not manifest_path.exists():
+        return None
+    manifest = json.loads(manifest_path.read_text())
+    files = manifest.get("drive_files") or {}
+    archive = manifest.get("archive_name")
+    entry = files.get(archive) if archive else None
+    if not entry or not entry.get("id"):
+        return None
+    return {
+        "file_id": entry["id"],
+        "size": int(entry["size"]),
+        "sha256": entry["sha256"],
+        "archive": archive,
+        "commit": manifest["commit"],
+    }
+
+
+def _build_drive_download_block(cache_manifest):
+    """Build the drive_download task block from the server-verified
+    model manifest (+ the ComfyUI download entry when present).
+    The block carries Drive file ids, pinned sizes and SHA-256s only —
+    never a token value. Raises when the manifest does not name
+    exactly the four pinned model files."""
+    manifest = json.loads(Path(cache_manifest).read_text())
+    entries = manifest.get("files", [])
+    from h3_contract import MODEL_FILES
+
+    if {x.get("path") for x in entries} != set(MODEL_FILES):
+        raise RuntimeError("drive_download needs exactly the four pinned model files")
+    files = []
+    for x in entries:
+        if not x.get("drive_file_id") or not x.get("sha256"):
+            raise RuntimeError("drive_download entry missing drive id/sha256: " + str(x.get("path")))
+        files.append({"file_id": x["drive_file_id"], "path": x["path"],
+                      "size": int(x["size"]), "sha256": x["sha256"],
+                      "md5": x.get("server_md5")})
+    probe_file = min(files, key=lambda f: f["size"])
+    return {
+        "files": files,
+        "comfyui": _comfyui_download_task(),
+        "dest_dir": REMOTE + "/drive_downloads",
+        "token_file": REMOTE + "/drive_token.json",
+        "probe": {"file_id": probe_file["file_id"]},
+    }
+
+
+def verify_drive_download_preflight(args) -> dict:
+    """Pre-GPU-allocation proof that the noninteractive download chain
+    works: the download module imports, a read-only token mints from
+    the user ADC, and that token can read Drive metadata for a pinned
+    model file. This proves the credential chain only; remote
+    throughput is NOT proven here (TESTABLE_HYPOTHESIS) and is
+    measured by the remote probe + the restore itself. Raises on any
+    failure; nothing is allocated yet, so a refusal is clean."""
+    import h3_drive_download
+    import h3_drive_token
+
+    if not hasattr(h3_drive_download, "DriveDownloader") \
+            or not hasattr(h3_drive_download, "FileTokenProvider"):
+        raise RuntimeError("h3_drive_download module is missing its download API")
+    doc = h3_drive_token.mint_readonly_token()
+    # Prove the minted token against the live Drive API with a metadata
+    # GET only (no media bytes): a token that cannot read metadata
+    # cannot download anything either.
+    from h3_drive_download import DriveDownloader
+
+    class _PreflightProvider:
+        def __init__(self, token):
+            self._token = token
+
+        def get_token(self):
+            return self._token
+
+        def refresh(self):
+            raise RuntimeError("preflight never refreshes")
+
+        @property
+        def token_id(self):
+            return doc["token_id"]
+
+        def seconds_remaining(self):
+            return 3600.0
+
+    block = _build_drive_download_block(args.cache_manifest)
+    downloader = DriveDownloader(_PreflightProvider(doc["access_token"]))
+    meta = downloader.get_metadata(block["files"][0]["file_id"])
+    if str(meta.get("size", "")) != str(block["files"][0]["size"]):
+        raise RuntimeError("preflight metadata size mismatch for probe file")
+    record({"event": "drive_download_preflight_ok",
+            "run_id": getattr(args, "run_id", ""),
+            "token_id": doc["token_id"],
+            "probe_file_id": block["files"][0]["file_id"]})
+    return {"preflight": "ok", "token_id": doc["token_id"],
+            "probe_file_id": block["files"][0]["file_id"]}
+
+
+def _upload_drive_token(session: str, run_dir, token_doc: dict, remote_name: str) -> dict:
+    """Write a token document to a local 0600 file and upload it to
+    the remote workdir. Returns {"token_id", "remote_path"}. The token
+    value is never logged or returned in the record (only token_id)."""
+    import h3_drive_token
+
+    local_path = h3_drive_token.write_token_file(run_dir / remote_name, token_doc)
+    run_cli(["upload", "-s", session, str(local_path), REMOTE + "/" + remote_name], timeout=120)
+    return {"token_id": token_doc["token_id"], "remote_path": REMOTE + "/" + remote_name}
+
+
+def _mint_and_upload_drive_token(session: str, run_dir, remote_name: str) -> dict:
+    """Mint a fresh read-only token and upload it as a 0600 file.
+    One helper so the download branch has a single boundary (the
+    chain harnesses stub this, like mount_drive); the real mint +
+    upload are covered by tests/test_drive_download.py."""
+    import h3_drive_token
+
+    return _upload_drive_token(session, run_dir,
+                               h3_drive_token.mint_readonly_token(), remote_name)
+
+
 def create_run_id() -> str:
     return "h3-" + datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + __import__("secrets").token_hex(3)
 
@@ -1055,6 +1181,61 @@ def _manifest_worker_state(run_id: str, state: dict) -> None:
         _manifest_update(run_id, heartbeat=True)
 
 
+def _handle_token_refresh_request(session: str, run_id: str, run_dir,
+                                  renewal_state: dict, state: dict) -> None:
+    """Serve one worker token-renewal request (TASK-006 P0-B).
+
+    The worker asks through its durable job state
+    (``token_refresh_requested``: token id + timestamp) when its
+    short-lived Drive token is inside the renewal margin. The
+    controller mints a fresh read-only token and uploads it as a new
+    0600 file; the worker's provider picks it up on its next
+    get_token() call. Bounded by MAX_TOKEN_RENEWALS per run; a
+    renewal failure is recorded but never raises here — the worker
+    fails closed on token expiry, and a renewal failure must not kill
+    an otherwise healthy poll loop. Only token ids are recorded,
+    never token values."""
+    from h3_drive_download import MAX_TOKEN_RENEWALS
+    import h3_drive_token
+
+    req = (state or {}).get("token_refresh_requested")
+    if not isinstance(req, dict):
+        return
+    token_id = req.get("token_id")
+    if not token_id or token_id == renewal_state.get("last_token_id"):
+        return  # already served this token, or nothing to serve
+    if renewal_state.get("count", 0) >= MAX_TOKEN_RENEWALS:
+        record({"event": "token_renewal_refused", "session": session,
+                "run_id": run_id, "token_id": token_id,
+                "reason": f"max renewals reached ({MAX_TOKEN_RENEWALS})"})
+        renewal_state["last_token_id"] = token_id
+        return
+    try:
+        doc = h3_drive_token.mint_readonly_token()
+        _upload_drive_token(session, run_dir, doc, "drive_token.json")
+        renewal_state["count"] = renewal_state.get("count", 0) + 1
+        renewal_state["last_token_id"] = token_id
+        record({"event": "token_renewed", "session": session,
+                "run_id": run_id, "token_id": doc["token_id"],
+                "renewals_used": renewal_state["count"]})
+    except Exception as e:  # noqa: BLE001 - recorded, worker fails closed
+        record({"event": "token_renewal_failed", "session": session,
+                "run_id": run_id, "token_id": token_id,
+                "error_type": type(e).__name__})
+
+
+def _make_worker_state_handler(run_id: str, session: str, run_dir,
+                               renewal_state: dict):
+    """Combine the manifest heartbeat with token-renewal service into
+    the single on_state callback wait_for_worker expects."""
+    def _handler(state: dict) -> None:
+        _manifest_worker_state(run_id, state)
+        _handle_token_refresh_request(session, run_id, run_dir,
+                                      renewal_state, state)
+
+    return _handler
+
+
 def launch_worker(session: str) -> dict:
     """Short-start the detached worker. Returns the launch record
     (run_id, variant, pid, state_file, log_file). Raises on any launch
@@ -1440,7 +1621,9 @@ def _resume_run(args) -> dict:
         session_id, run_id, variant,
         deadline_monotonic=time.monotonic() + budget_sec,
         poll_interval_sec=getattr(args, "poll_interval_sec", 60),
-        on_state=lambda s: _manifest_worker_state(run_id, s))
+        on_state=_make_worker_state_handler(
+            run_id, session_id, RUNS / run_id,
+            {"count": 0, "last_token_id": None}))
     return _resume_finish(args, manifest, worker_state)
 
 
@@ -1530,10 +1713,17 @@ def run_variant(args) -> dict:
         raise RuntimeError("gpu-policy must be G4_THEN_A100_HIGHMEM")
     if not args.comfy_ref or len(args.comfy_ref) < 7:
         raise RuntimeError("Pin ComfyUI commit hash or tag")
-    if not args.drive_cache_dir.startswith("/content/drive/"):
-        raise RuntimeError("Expected explicitly mounted Drive cache path under /content/drive")
-    if not args.approve_interactive_drive_mount:
-        raise RuntimeError("G4 blocked: --approve-interactive-drive-mount required")
+    # TASK-006 P0-B: the noninteractive download path is the default.
+    # The mount path (interactive drivemount) remains only as an
+    # explicit manual debug path; it keeps its old gates.
+    drive_source = getattr(args, "drive_source", "download")
+    if drive_source not in ("download", "mount"):
+        raise ValueError("drive-source must be download or mount")
+    if drive_source == "mount":
+        if not args.drive_cache_dir.startswith("/content/drive/"):
+            raise RuntimeError("Expected explicitly mounted Drive cache path under /content/drive")
+        if not args.approve_interactive_drive_mount:
+            raise RuntimeError("G4 blocked: --approve-interactive-drive-mount required")
     if not args.fresh_inference:
         raise RuntimeError("--fresh-inference required for a from-zero production run")
     # TASK-005 §8 (Issue #31): a run_id is the run's identity. A second
@@ -1603,11 +1793,16 @@ def run_variant(args) -> dict:
             "CRITICAL_ORPHAN_GPU_SESSION: managed GPU session(s) still active; refusing to allocate "
             "another GPU in parallel. Stop them first (never stop non-project sessions): "
             + "; ".join(lines))
-    probe = run_cli(['drivemount','--help'], timeout=20, check=False)
-    if probe["returncode"] != 0:
-        raise RuntimeError("Official Colab drivemount unavailable")
-    if not sys.stdin.isatty():
-        raise RuntimeError("Official drivemount requires interactive terminal; no TTY, abort BEFORE GPU allocation")
+    if drive_source == "mount":
+        probe = run_cli(['drivemount', '--help'], timeout=20, check=False)
+        if probe["returncode"] != 0:
+            raise RuntimeError("Official Colab drivemount unavailable")
+        if not sys.stdin.isatty():
+            raise RuntimeError("Official drivemount requires interactive terminal; no TTY, abort BEFORE GPU allocation")
+    else:
+        # Noninteractive path: prove the download chain (mint + metadata
+        # read with the minted token) BEFORE any paid GPU exists.
+        verify_drive_download_preflight(args)
 
     run_dir = RUNS / args.run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -1747,15 +1942,21 @@ def run_variant(args) -> dict:
             record({"event": "watchdog_deadline_updated", "session": session,
                     "budget_sec": budget_sec, "rate_cu_h": live["rate"],
                     "deadline_utc": new_deadline.isoformat()})
-            # Remote signature probe: verify drive.mount accepts timeout_ms
-            # before spending the mount window on a patched call the remote
-            # runtime would reject with TypeError.
-            sig = exec_script(session, ROOT / "h3_mount_signature_probe.py", timeout=120)
-            if not check_mount_signature(sig):
-                raise RuntimeError("Remote drive.mount does not accept timeout_ms; abort before drivemount")
-            # Official interactive Drive mount (patched remote timeout 600s).
-            mount_drive(session, deadline_sec=budget_sec, run_id=args.run_id,
-                        timeline_path=run_dir / "mount_timeline.json")
+            # TASK-006 P0-B: the mount path only. The download path
+            # never calls drivemount: the worker downloads from Drive
+            # with a short-lived token instead.
+            drive_download = None
+            renewal_state = {"count": 0, "last_token_id": None}
+            if drive_source == "mount":
+                # Remote signature probe: verify drive.mount accepts timeout_ms
+                # before spending the mount window on a patched call the remote
+                # runtime would reject with TypeError.
+                sig = exec_script(session, ROOT / "h3_mount_signature_probe.py", timeout=120)
+                if not check_mount_signature(sig):
+                    raise RuntimeError("Remote drive.mount does not accept timeout_ms; abort before drivemount")
+                # Official interactive Drive mount (patched remote timeout 600s).
+                mount_drive(session, deadline_sec=budget_sec, run_id=args.run_id,
+                            timeline_path=run_dir / "mount_timeline.json")
             exec_script(session, ROOT / "h3_init_remote.py", timeout=60)
             # Upload poster, contract, assemble, manifest, workflow, submitted workflow.
             api = validate_comfy_workflow(args.workflow_api, variant)
@@ -1770,21 +1971,50 @@ def run_variant(args) -> dict:
                 (submitted_path, REMOTE + "/workflow_submitted.json"),
             ]:
                 run_cli(["upload", "-s", session, str(source), target], timeout=300)
-            mount_cfg = RUNS / f"mount_{session}.json"
-            mount_cfg.write_text(json.dumps({"drive_cache_dir": args.drive_cache_dir}))
-            run_cli(["upload", "-s", session, str(mount_cfg), REMOTE + "/drive_mount_config.json"], timeout=120)
-            mount_probe = exec_script(session, ROOT / "h3_drive_probe.py", timeout=180)
-            persist_exec_result(run_dir, f"drive_probe_{variant}", mount_probe)
-            if "MUSE_DRIVE_MOUNT_MODELS_VISIBLE 4" not in mount_probe["stdout"]:
-                raise RuntimeError("Mounted Drive model cache not visible; release GPU")
-            # Worker files go up only after the mounted-cache probe passed:
+            if drive_source == "mount":
+                mount_cfg = RUNS / f"mount_{session}.json"
+                mount_cfg.write_text(json.dumps({"drive_cache_dir": args.drive_cache_dir}))
+                run_cli(["upload", "-s", session, str(mount_cfg), REMOTE + "/drive_mount_config.json"], timeout=120)
+                mount_probe = exec_script(session, ROOT / "h3_drive_probe.py", timeout=180)
+                persist_exec_result(run_dir, f"drive_probe_{variant}", mount_probe)
+                if "MUSE_DRIVE_MOUNT_MODELS_VISIBLE 4" not in mount_probe["stdout"]:
+                    raise RuntimeError("Mounted Drive model cache not visible; release GPU")
+            else:
+                # Noninteractive path: deliver the worker token + a
+                # separate probe token, the download module, and the
+                # probe spec; prove the remote transport with a 1 MiB
+                # Range probe before the worker starts. The worker
+                # token file is deleted by the worker on first read.
+                drive_download = _build_drive_download_block(args.cache_manifest)
+                _mint_and_upload_drive_token(session, run_dir, "drive_token.json")
+                _mint_and_upload_drive_token(session, run_dir, "drive_token_probe.json")
+                probe_spec_path = run_dir / "drive_download_probe.json"
+                probe_spec_path.write_text(json.dumps(drive_download["probe"]))
+                run_cli(["upload", "-s", session, str(probe_spec_path),
+                         REMOTE + "/drive_download_probe.json"], timeout=120)
+                run_cli(["upload", "-s", session, str(ROOT / "h3_drive_download.py"),
+                         REMOTE + "/h3_drive_download.py"], timeout=120)
+                run_cli(["upload", "-s", session, str(ROOT / "h3_drive_download_probe.py"),
+                         REMOTE + "/h3_drive_download_probe.py"], timeout=120)
+                download_probe = exec_script(session, ROOT / "h3_drive_download_probe.py", timeout=180)
+                persist_exec_result(run_dir, f"drive_download_probe_{variant}", download_probe)
+                if "MUSE_DRIVE_DOWNLOAD_PROBE_OK" not in download_probe["stdout"]:
+                    raise RuntimeError("Remote Drive download probe failed; release GPU")
+                record({"event": "drive_download_probe_ok", "session": session,
+                        "run_id": args.run_id,
+                        "probe_file_id": drive_download["probe"]["file_id"]})
+            # Worker files go up only after the cache probe passed:
             # the probe must run before the remote worker that does H3
             # inference (and the test in test_auth_and_transport enforces
             # this order). The launcher needs both files on the remote disk.
-            for source, target in [
+            worker_uploads = [
                 (ROOT / "h3_job_state.py", REMOTE + "/h3_job_state.py"),
                 (ROOT / "h3_remote_worker.py", REMOTE + "/h3_remote_worker.py"),
-            ]:
+            ]
+            if drive_source == "download":
+                worker_uploads.append(
+                    (ROOT / "h3_drive_download.py", REMOTE + "/h3_drive_download.py"))
+            for source, target in worker_uploads:
                 run_cli(["upload", "-s", session, str(source), target], timeout=300)
             # Single-variant remote worker.
             elapsed = time.monotonic() - start
@@ -1794,7 +2024,14 @@ def run_variant(args) -> dict:
                     "inference_timeout_sec": min(1800, max(100, int(budget_sec - elapsed - 120))),
                     "rate_cu_h": live["rate"],
                     "session_budget_cu": round(budget_sec * float(live["rate"]) / 3600.0, 3),
-                    "comfyui_cache": _comfyui_cache_task()}
+                    "comfyui_cache": _comfyui_cache_task(),
+                    "drive_source": drive_source}
+            if drive_source == "download":
+                # The worker downloads from Drive with the delivered
+                # short-lived token; drive_cache_dir is kept as the
+                # download staging dir for the worker's path handling.
+                task["drive_cache_dir"] = drive_download["dest_dir"]
+                task["drive_download"] = drive_download
             task_path = RUNS / f"task_{session}.json"
             task_path.write_text(json.dumps(task))
             run_cli(["upload", "-s", session, str(task_path), REMOTE + "/task.json"], timeout=120)
@@ -1811,7 +2048,8 @@ def run_variant(args) -> dict:
                     session, args.run_id, variant,
                     deadline_monotonic=start + budget_sec,
                     poll_interval_sec=getattr(args, "poll_interval_sec", 60),
-                    on_state=lambda s: _manifest_worker_state(args.run_id, s))
+                    on_state=_make_worker_state_handler(
+                        args.run_id, session, run_dir, renewal_state))
                 done_info = check_job_done_info(worker_state.get("output"), variant)
             except Exception:
                 # Pull the server log before the session stops: it holds
@@ -2047,6 +2285,12 @@ def main():
     parser.add_argument("--poll-interval-sec", type=int, default=60,
                         help="Seconds between worker-state polls (TASK-005 §4.2).")
     parser.add_argument("--approve-interactive-drive-mount", action="store_true")
+    parser.add_argument("--drive-source", choices=("download", "mount"), default="download",
+                        help="TASK-006 P0-B: how the worker gets the models. "
+                             "'download' (default) uses a short-lived read-only "
+                             "Drive token + Range download, no drivemount. "
+                             "'mount' is the legacy interactive drivemount path "
+                             "(manual debug only; requires --approve-interactive-drive-mount and a TTY).")
     parser.add_argument("--fresh-inference", action="store_true")
     for flag in ("execute", "confirm-gpu", "authorize-task-gpu", "allow-g4", "allow-a100-highmem"):
         parser.add_argument("--" + flag, action="store_true")

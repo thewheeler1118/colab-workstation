@@ -72,12 +72,16 @@ class MountedCacheProbeTests(unittest.TestCase):
  def test_probe_occurs_before_variants(self):
   # 2026-11-11: run is single-variant (A or B per invocation), so there is
   # no longer a `for variant in ('A','B')` loop in the controller. Intent
-  # is unchanged: the mounted Drive probe must run before the remote
-  # worker that does H3 inference.
+  # is unchanged: the cache probe must run before the remote worker that
+  # does H3 inference. TASK-006 P0-B: the DEFAULT path probes the
+  # noninteractive Drive download; the legacy mount path keeps its own
+  # probe-before-worker order.
   text=Path(h.__file__).read_text()
   body=text[text.index("def run_variant"):]
-  self.assertIn("h3_drive_probe.py",body)
+  self.assertIn("h3_drive_download_probe.py",body)
   self.assertIn("h3_remote_worker.py",body)
+  self.assertLess(body.index("h3_drive_download_probe.py"),body.index("h3_remote_worker.py"))
+  self.assertIn("h3_drive_probe.py",body)
   self.assertLess(body.index("h3_drive_probe.py"),body.index("h3_remote_worker.py"))
 
 class LegacyVaeReuseTests(unittest.TestCase):

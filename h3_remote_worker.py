@@ -1,5 +1,8 @@
 """Remote Colab single-variant H3 execution. Invoked by `colab exec -f`.
-Requires a previously authorized/mounted Drive and a server-verified cache manifest.
+Requires a previously authorized/mounted Drive (mount path) or a
+delivered short-lived Drive token plus a drive_download task block
+(noninteractive download path, TASK-006 P0-B), and a server-verified
+cache manifest.
 Must NOT be considered production-verified until ComfyUI API workflow is exported/validated.
 """
 from __future__ import annotations
@@ -30,6 +33,33 @@ from assemble import run as assemble_video,ffprobe
 _LAST_STAGE = "init"
 _JOB_RUN_ID = ""
 _JOB_VARIANT = ""
+# Token id of the last renewal request sent to the controller, so a
+# long download asks once per token instead of on every chunk.
+_LAST_REFRESH_REQUEST_TOKEN_ID = None
+
+
+def _request_token_refresh(provider) -> None:
+    """Ask the controller (through the durable job state) for a fresh
+    short-lived Drive token. Best-effort and throttled: one request per
+    token id. The controller uploads a new 0600 token file; the
+    provider picks it up on its next get_token() call. Never carries
+    a token value, only the token id."""
+    global _LAST_REFRESH_REQUEST_TOKEN_ID
+    try:
+        token_id = provider.token_id if provider is not None else None
+        if token_id is not None and token_id == _LAST_REFRESH_REQUEST_TOKEN_ID:
+            return
+        _LAST_REFRESH_REQUEST_TOKEN_ID = token_id
+        if _JOB_RUN_ID and _JOB_VARIANT:
+            write_job_state(ROOT, _JOB_RUN_ID, _JOB_VARIANT,
+                            WORKER_PHASE_TO_JOB_STAGE.get(_LAST_STAGE, _LAST_STAGE),
+                            extra={"token_refresh_requested": {
+                                "token_id": token_id,
+                                "requested_at_utc": time.strftime(
+                                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime())}})
+            print("TOKEN_REFRESH_REQUESTED", token_id, flush=True)
+    except Exception:
+        pass
 
 
 def set_stage(name: str) -> None:
@@ -391,7 +421,7 @@ def post_json(url,data,timeout=30):
         except Exception:body=''
         raise RuntimeError(f'POST {url} failed HTTP {e.code}: {body[:2000]}') from e
 
-def ensure_comfy(comfy:Path,git_ref:str,cache=None):
+def ensure_comfy(comfy:Path,git_ref:str,cache=None,drive_download=None,token_provider=None):
     """Install the pinned ComfyUI source, then its Python dependencies.
 
     Order: (1) already-installed pinned commit -> reuse; (2) Drive source
@@ -403,14 +433,37 @@ def ensure_comfy(comfy:Path,git_ref:str,cache=None):
     every requirement is already satisfied, pip is skipped (it would
     install nothing new); otherwise pip runs exactly as before. No
     Python/Torch/CUDA version is changed and the pinned commit is never
-    moved."""
+    moved.
+
+    TASK-006 P0-B: when drive_download carries a "comfyui" entry, the
+    source archive is downloaded noninteractively from Drive (same
+    transport as the model restore) into a local directory first, and
+    restore_comfyui_from_cache verifies it exactly as it verified the
+    mounted-cache archive. A download failure is a cache failure and
+    falls through to git clone, as before."""
     if not git_ref:
         raise RuntimeError('No pinned ComfyUI commit/ref in manifest; refuse moving main')
     if (comfy/'.git').exists() and verify_comfyui_commit(comfy, git_ref):
         print('COMFYUI_ALREADY_PRESENT', git_ref, flush=True)
     else:
         restored = False
-        if cache and cache.get('dir') and cache.get('sha256') and cache.get('commit'):
+        if drive_download and drive_download.get('comfyui') and token_provider is not None:
+            try:
+                from h3_drive_download import DriveDownloader
+                entry = drive_download['comfyui']
+                dl_dir = ROOT / 'drive_downloads'
+                downloader = DriveDownloader(token_provider)
+                downloader.download_file(
+                    entry['file_id'], int(entry['size']), entry['sha256'],
+                    dl_dir / entry['archive'],
+                    on_token_expiring=lambda tid, rem: _request_token_refresh(token_provider))
+                restore_comfyui_from_cache(
+                    dl_dir, comfy, entry['sha256'], entry['commit'],
+                    entry['archive'])
+                restored = True
+            except Exception as e:
+                print('COMFYUI_CACHE_FAILED', type(e).__name__, str(e)[:500], flush=True)
+        if not restored and cache and cache.get('dir') and cache.get('sha256') and cache.get('commit'):
             try:
                 restore_comfyui_from_cache(Path(cache['dir']), comfy,
                                            cache['sha256'], cache['commit'],
@@ -431,8 +484,42 @@ def ensure_comfy(comfy:Path,git_ref:str,cache=None):
     else:
         print('PIP_INSTALL_SKIPPED', 'all requirements already satisfied', flush=True)
 
-def restore_weights(comfy:Path,cache:Path,manifest:dict,rate_cu_h=None,budget_cu=None):
+def restore_weights(comfy:Path,cache:Path,manifest:dict,rate_cu_h=None,budget_cu=None,drive_download=None,token_provider=None):
     validate_model_cache_manifest(manifest)
+    # TASK-006 P0-B: noninteractive download path. Each model file is
+    # downloaded straight to its NVMe destination with Range resume and
+    # a full SHA-256 verify inside the downloader; the existing
+    # CACHE_REUSE fast path still skips an already-verified file, and
+    # the capacity check still runs first. A download failure raises
+    # here (fail closed) — it never falls through to a stale mount.
+    if drive_download is not None:
+        if token_provider is None:
+            raise RuntimeError('Drive download requested but no token provider supplied')
+        from h3_drive_download import DriveDownloader
+        total=int(sum(int(x['size']) for x in manifest['files']))
+        check_restore_capacity(comfy,total,rate_cu_h=rate_cu_h,budget_cu=budget_cu)
+        downloader = DriveDownloader(token_provider)
+        files = drive_download.get('files') or []
+        by_path = {entry['path']: entry for entry in files}
+        projected = [False]
+        for item in manifest['files']:
+            relative=Path(item['path'])
+            dst=comfy/'models'/relative
+            dst.parent.mkdir(parents=True,exist_ok=True)
+            if dst.exists() and dst.stat().st_size==item['size'] and sha256_file(dst)==item['sha256']:
+                print('CACHE_REUSE',relative,flush=True);continue
+            entry = by_path.get(item['path'])
+            if not entry or not entry.get('file_id'):
+                raise RuntimeError('Drive download entry missing for '+str(relative))
+            copy_start=time.monotonic()
+            downloader.download_file(
+                entry['file_id'], int(item['size']), item['sha256'], dst,
+                expected_md5=item.get('server_md5'),
+                on_progress=lambda done, total_bytes, rel=relative: _download_progress(
+                    rel, done, total, copy_start, projected, rate_cu_h, budget_cu),
+                on_token_expiring=lambda tid, rem: _request_token_refresh(token_provider))
+            print('CACHE_VERIFIED_NVME',relative,flush=True)
+        return
     if not cache.is_dir():raise RuntimeError('Drive cache not mounted. OAuth/mount MUST be handled interactively before worker.')
     total=int(sum(int(x['size']) for x in manifest['files']))
     check_restore_capacity(comfy,total,rate_cu_h=rate_cu_h,budget_cu=budget_cu)
@@ -466,6 +553,20 @@ def restore_weights(comfy:Path,cache:Path,manifest:dict,rate_cu_h=None,budget_cu
         finally:
             if tmp.exists():tmp.unlink()
         print('CACHE_VERIFIED_NVME',relative,flush=True)
+
+
+def _download_progress(relative, done, grand_total, copy_start, projected, rate_cu_h, budget_cu):
+    """Progress hook for the noninteractive download path: periodic
+    throughput projection (same once-only rule as the mounted-copy
+    path: grand total projected from the current file's measured rate)
+    without ever touching token material. ``projected`` is a
+    one-element list so the once-only flag survives the callback."""
+    if done % (256 * 1024 * 1024) == 0:
+        print('MODEL_COPY_PROGRESS', relative, done, flush=True)
+        if not projected[0]:
+            projected[0] = True
+            project_restore_throughput(grand_total, done, time.monotonic() - copy_start,
+                                       rate_cu_h=rate_cu_h, budget_cu=budget_cu)
 
 def wait_health(server, proc,deadline):
     while time.monotonic()<deadline:
@@ -751,7 +852,24 @@ def main():
     _JOB_RUN_ID = run_id
     _JOB_VARIANT = version
     manifest=json.loads((ROOT/'model_manifest.json').read_text())
-    cache=Path(task['drive_cache_dir']);comfy=Path('/content/ComfyUI')
+    # TASK-006 P0-B: noninteractive download path. The token provider is
+    # built once here and shared by the ComfyUI restore and the model
+    # restore; load_initial fails closed before any inference when no
+    # token file was delivered. The mount path leaves drive_download
+    # unset and keeps the previous behaviour exactly.
+    drive_download=task.get('drive_download')
+    token_provider=None
+    if drive_download is not None:
+        from h3_drive_download import FileTokenProvider
+        token_provider=FileTokenProvider(ROOT/'drive_token.json')
+        token_provider.load_initial()
+    if task.get('drive_cache_dir'):
+        cache=Path(task['drive_cache_dir'])
+    elif drive_download is not None:
+        cache=Path(drive_download['dest_dir'])
+    else:
+        cache=None
+    comfy=Path('/content/ComfyUI')
     if not (ROOT/'poster.jpg').is_file():raise FileNotFoundError('poster missing')
     server='http://127.0.0.1:8188'
     logfile=(ROOT/'comfyui.log').open('a')
@@ -764,9 +882,9 @@ def main():
         # so no WORKER_FAILED_JSON was printed and the stage had to be
         # inferred from the persisted traceback instead.
         set_stage('ensure_comfy')
-        ensure_comfy(comfy,task['comfy_ref'],task.get('comfyui_cache'))
+        ensure_comfy(comfy,task['comfy_ref'],task.get('comfyui_cache'),drive_download=drive_download,token_provider=token_provider)
         set_stage('restore_weights')
-        restore_weights(comfy,cache,manifest,rate_cu_h=task.get('rate_cu_h'),budget_cu=task.get('session_budget_cu'))
+        restore_weights(comfy,cache,manifest,rate_cu_h=task.get('rate_cu_h'),budget_cu=task.get('session_budget_cu'),drive_download=drive_download,token_provider=token_provider)
         (comfy/'input').mkdir(exist_ok=True)
         shutil.copy2(ROOT/'poster.jpg',comfy/'input'/'muse_original_poster.jpg')
         set_stage('comfyui_start')

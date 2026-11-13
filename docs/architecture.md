@@ -19,14 +19,17 @@ h3_controller.py  (CLI: plan | check | preflight | run)
   │  reference_v2/colab_manager (parse_* / redact_*)
   ├─► official `colab` CLI 0.7.5 (vendored patches, see patches/)
   │     ├─► Colab GPU session (G4, then A100 High-Mem on capacity failure)
-  │     └─► Drive mount (official drivemount, timeout_ms=600000)
+  │     └─► Drive mount (official drivemount, timeout_ms=600000) — legacy
+  │           mount path only; default is the noninteractive Drive download
+  │           (TASK-006 P0-B): short-lived read-only token + Range download
   ├─► Drive API (drive_depot / drive_api / drive_resumable) — depot verify
   └─► local ledger model_cache/h3_production_budget_<task>.json (gitignored)
         │
         ▼ (remote, via `colab exec -f`)
   h3_remote_worker.py  (on the Colab runtime, stdlib only + ComfyUI)
         ├─► ensure_comfy (Drive source cache → git clone fallback)
-        ├─► restore_weights (DriveFS → NVMe, SHA-256 per file)
+        ├─► restore_weights (Drive download via h3_drive_download, or
+        │     DriveFS → NVMe on the legacy mount path; SHA-256 per file)
         ├─► ComfyUI :8188 — /object_info validation, /prompt submit
         ├─► find_rendered_video (SaveVideo history shapes)
         └─► assemble.py (226 frames + 48 poster frames = 274)

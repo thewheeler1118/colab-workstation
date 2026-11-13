@@ -14,9 +14,13 @@ never allocates a session.
 6. CLI post-body patch present (`_cli_post_patch` → cli_post_body_patch_present).
    If missing: reinstall patches/google-colab-cli-0.7.5/ into the venv and
    re-run; preflight fails closed otherwise.
-7. CLI drivemount timeout patch present (`_cli_drivemount_patch`).
+7. CLI drivemount timeout patch present (`_cli_drivemount_patch`). Mount-path
+   only (TASK-006 P0-B): the default download path never calls drivemount.
 8. Interactive PTY available (`_pty` — the official drivemount needs a TTY;
-   without one the run is blocked BEFORE any GPU is requested).
+   without one the MOUNT path is blocked BEFORE any GPU is requested. The
+   default download path does not need a TTY; its gate is the download
+   preflight in `run_variant`, which mints a read-only token and reads
+   Drive metadata before allocation).
 9. Budget ledger initialises within the 30 CU task envelope (`_budget`).
 10. Restore capacity: 40GB fits on the remote disk within budget (`_restore_capacity`).
 11. No active sessions (`_sessions` — a live session blocks a new run).

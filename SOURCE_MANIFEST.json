@@ -35,8 +35,8 @@
     },
     {
       "path": "AGENTS.md",
-      "size_bytes": 3989,
-      "sha256": "601071c019f446689a23b88ee6057c5b715634bbbe4b6bb7e62f515ac828a797",
+      "size_bytes": 4112,
+      "sha256": "3fba35883d80c34a333ad9a72bb699d6d6da1f7c17ea14281d599928d873a899",
       "role": "Supporting file"
     },
     {
@@ -113,8 +113,8 @@
     },
     {
       "path": "docs/architecture.md",
-      "size_bytes": 4855,
-      "sha256": "ef4fa43feee537c99e1abcee6b497bf846dd568b4b4941cdcd4163295f9047f0",
+      "size_bytes": 5104,
+      "sha256": "efd628b47a462ace49f9b9f72e1d80aee06d04a48e2e434eabf6d994879b95d9",
       "role": "Documentation / evidence"
     },
     {
@@ -191,8 +191,8 @@
     },
     {
       "path": "docs/execution_flow.md",
-      "size_bytes": 10092,
-      "sha256": "5476273516421576a8fb15748d8e38dabe1a41aa444d5f17f109180e1bbdb934",
+      "size_bytes": 11406,
+      "sha256": "2b73d5a755bd40cde6e92b577670f0abf683fd93bf0595e9cd78eb42b3ad5194",
       "role": "Documentation / evidence"
     },
     {
@@ -413,8 +413,8 @@
     },
     {
       "path": "docs/module_inventory.md",
-      "size_bytes": 39532,
-      "sha256": "e958e53721f209157ef0683a6139d53b89408971ec95cca9e6b44098d3b589e0",
+      "size_bytes": 41155,
+      "sha256": "53d010c555089aa3ae9dc5171b9e5526dae7c8d0786d3c9d356e68dbda7975b2",
       "role": "Module inventory (this table's source of truth for hashes)"
     },
     {
@@ -449,14 +449,14 @@
     },
     {
       "path": "docs/runbooks/preflight.md",
-      "size_bytes": 1675,
-      "sha256": "10ebbe53c21b93e67281e0f00500f41c7129a4fe4020fa638c303b56e5209080",
+      "size_bytes": 1951,
+      "sha256": "e1962666a201342b07cc29f02373ff0613a3ecf69efb1a3b6bd5525501127b7a",
       "role": "Documentation / evidence"
     },
     {
       "path": "docs/runbooks/production-run.md",
-      "size_bytes": 1543,
-      "sha256": "382bbd3aab3f9009dfa96c6807671762600584d04795838e15955d81fc5dc588",
+      "size_bytes": 1866,
+      "sha256": "4700d448b54a933c3b9467b99172819ce00fa07631c07e11fc3940c4e2625bef",
       "role": "Documentation / evidence"
     },
     {
@@ -557,15 +557,33 @@
     },
     {
       "path": "h3_controller.py",
-      "size_bytes": 110425,
-      "sha256": "f2b36bb9d3d07d055808047df7548df098eedcdcfd3563f85a3c6f66abfb100b",
+      "size_bytes": 122845,
+      "sha256": "9adb11c73a7c2b2c2e447be008da29e7b7ef40d67839818d3f847d212339674d",
       "role": "Run orchestration: preflight, allocation, mount, worker exec, download, stop"
+    },
+    {
+      "path": "h3_drive_download.py",
+      "size_bytes": 28567,
+      "sha256": "ee74523e3fd9e1c5c9f637e7fbf9ab98fe3765798899a2b3f71089d7621f70a1",
+      "role": "Supporting file"
+    },
+    {
+      "path": "h3_drive_download_probe.py",
+      "size_bytes": 2044,
+      "sha256": "67a0f43305b3338cdce49bb3cbd7dcba9c4736f0dd3fcd717e994e2079464a73",
+      "role": "Supporting file"
     },
     {
       "path": "h3_drive_probe.py",
       "size_bytes": 1109,
       "sha256": "1b2b2ff4175073011a42a51bde8188fdf7ec9d5fc73b67750d1f40ecc956ef8a",
       "role": "Remote mounted-model visibility probe (4 files, exact sizes)"
+    },
+    {
+      "path": "h3_drive_token.py",
+      "size_bytes": 2993,
+      "sha256": "39068daaa6dd3ddc90edf018657571cf7d2aff268fd2d5cd61d76d056e97648b",
+      "role": "Supporting file"
     },
     {
       "path": "h3_drive_transport.py",
@@ -635,8 +653,8 @@
     },
     {
       "path": "h3_remote_worker.py",
-      "size_bytes": 42766,
-      "sha256": "ca94de29ff4a0ef82c4d501ebe82825bc117ca743e74b4bae51e73a1851723ba",
+      "size_bytes": 49333,
+      "sha256": "3051f371ef32783ad6380291f8120e244472f5870c46c55c1d54895ee5fd4dc2",
       "role": "Remote ComfyUI worker: restore, inference, find_rendered_video, assemble"
     },
     {
@@ -815,8 +833,8 @@
     },
     {
       "path": "scripts/run_h3_ab.sh",
-      "size_bytes": 2500,
-      "sha256": "f3573db85b685c59fc59c4f684c1c10fcf717b68bb4ffaf1f4d5d267dee21da3",
+      "size_bytes": 2621,
+      "sha256": "77dbb4697f082832fbb8e7a837494d0a621f471eb39e44b74b08687acb87ec50",
       "role": "Operator wrapper / offline check"
     },
     {
@@ -881,8 +899,8 @@
     },
     {
       "path": "tests/test_auth_and_transport.py",
-      "size_bytes": 4953,
-      "sha256": "d7c565e83574fa377381006b9f3e5ab2adb053c80708c5ec1a051ca0476d537d",
+      "size_bytes": 5235,
+      "sha256": "07ac31e0cb249bea653e0415d30b1f0bd9497d66fd4ccb71089f906ea479397e",
       "role": "Tests: CLI lookup, ADC metadata, Drive mount gates, READY guards"
     },
     {
@@ -905,8 +923,8 @@
     },
     {
       "path": "tests/test_drive_delivery.py",
-      "size_bytes": 23295,
-      "sha256": "35c7da44ffb08f60903d22f15427ab63ace8556c35afab407eb679a080242e85",
+      "size_bytes": 24451,
+      "sha256": "7f740f8b36298f346bf0d4d60872cf7fbc40449ed50efed3c32d372ed6ae8dcd",
       "role": "Tests"
     },
     {
@@ -914,6 +932,12 @@
       "size_bytes": 10782,
       "sha256": "821da750e96c3ace28f8afefb87bc1755262fa8ea6b2d667308fbf102146c13c",
       "role": "Tests: depot verify / manifest guards (mocked)"
+    },
+    {
+      "path": "tests/test_drive_download.py",
+      "size_bytes": 34905,
+      "sha256": "0197fc1113d1412610be1f03bd80034a23067e1269788b98af9f0de917ee99e4",
+      "role": "Tests"
     },
     {
       "path": "tests/test_drive_resumable.py",
@@ -941,8 +965,8 @@
     },
     {
       "path": "tests/test_fault_injection.py",
-      "size_bytes": 48465,
-      "sha256": "18a170d73c8513c3bbccb7a7036441c41cac97f85360d21be14c975b8e84f9cb",
+      "size_bytes": 49719,
+      "sha256": "7ee2b4d0d68166a4d6c74298728205956c8201ec1a2ffcc4012de3a21fec53ac",
       "role": "Tests"
     },
     {
@@ -1001,8 +1025,8 @@
     },
     {
       "path": "tests/test_stop_state_hotfix.py",
-      "size_bytes": 30504,
-      "sha256": "2bb90608f075592967c6342e58a1669258bdae03bc50c4c3015f74d307c8fa8f",
+      "size_bytes": 31660,
+      "sha256": "ed066d518e990f149d20f9f08a539fe52cbb3a4bd8aacd54f5cd3d383e6bcb2d",
       "role": "Tests"
     },
     {
