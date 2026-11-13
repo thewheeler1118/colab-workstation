@@ -78,6 +78,21 @@ def _audit_path(root: Path, run_id: str) -> Path:
     return manifest_dir(root) / f"{run_id}.audit.jsonl"
 
 
+def manifest_exists(root: Path, run_id: str) -> bool:
+    """True when a durable manifest already exists for this run_id.
+
+    The manifest is the run's identity (TASK-005 §8): a second `run`
+    with the same run_id would allocate a second paid GPU, re-run
+    inference, and collide with the first run's stage record. Callers
+    refuse a duplicate before any allocation; `resume`/`status` are the
+    recovery paths for an existing run. A missing or unreadable file
+    simply means 'no record' — this never raises."""
+    try:
+        return _manifest_path(root, run_id).is_file()
+    except Exception:
+        return False
+
+
 def _atomic_write_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=".h3_manifest_", dir=str(path.parent))
