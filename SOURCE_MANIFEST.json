@@ -413,8 +413,8 @@
     },
     {
       "path": "docs/module_inventory.md",
-      "size_bytes": 33597,
-      "sha256": "d2dbe89f48fec271964c24e846d3a98675c47c57e417b7d434b31f682aa906a2",
+      "size_bytes": 34094,
+      "sha256": "0fba0adb4a59b5af491647cb0bb5a2abb5a26be708c44ca09cc48f3943658f80",
       "role": "Module inventory (this table's source of truth for hashes)"
     },
     {
@@ -551,8 +551,8 @@
     },
     {
       "path": "h3_controller.py",
-      "size_bytes": 100991,
-      "sha256": "2b672dcc0da0f5fa856ea3169a73b91d71a1e6b2a7ac7719dda471f9d5a1cbc0",
+      "size_bytes": 105816,
+      "sha256": "6af0488f49546b80f7248bc45391485c85430c749de62999b36b900c65a5948e",
       "role": "Run orchestration: preflight, allocation, mount, worker exec, download, stop"
     },
     {
@@ -863,8 +863,8 @@
     },
     {
       "path": "tests/test_drive_delivery.py",
-      "size_bytes": 21570,
-      "sha256": "a668c80ad80cd5c880041f5346530bb5b5f1305604b66dc83fa5864c87d0c9ef",
+      "size_bytes": 22230,
+      "sha256": "3d88f82d03f19eac07e90e315d530444bd0ebf2c3cc383844fb417a045d4308e",
       "role": "Tests"
     },
     {
@@ -878,6 +878,12 @@
       "size_bytes": 5725,
       "sha256": "2eca69d133a10733133e17f36b35f95771c27597df9d556a1376300ffa64a964",
       "role": "Tests: resumable upload, 411 fallback, cross-process resume"
+    },
+    {
+      "path": "tests/test_durable_artifact_delivery.py",
+      "size_bytes": 8849,
+      "sha256": "4bbb8775cf1d47aaf5f077fe2b924bcc0b3b74c32e70b5fcb068305aa8534227",
+      "role": "Tests"
     },
     {
       "path": "tests/test_h3_comfyui_cache.py",
@@ -905,8 +911,8 @@
     },
     {
       "path": "tests/test_recoverable_controller.py",
-      "size_bytes": 29606,
-      "sha256": "7af1b843713982266cfce66c8a1af9dbbfd314e30a8336d1fcd9db5502c11aef",
+      "size_bytes": 30147,
+      "sha256": "a54d24a7ca555f4460ebf578781bf3887768568539a4b841feb8728bb7b0ca0b",
       "role": "Tests"
     },
     {

@@ -676,6 +676,102 @@ def archive_variant_to_drive(variant: str, run_id: str, qa_files: list | None = 
     return {"output_folder_id": run_folder, "files": uploaded}
 
 
+def _validate_delivery_inputs(variant: str, run_id: str, video_info: dict) -> Path:
+    """Fail-closed pre-check shared by deliver_variant_to_drive and the
+    idempotent wrapper: the local file must exist and be exactly the
+    validated 274-frame final video video_info describes."""
+    from h3_contract import sha256_file
+
+    local_path = OUTPUT_ROOT / run_id / f"{variant}.mp4"
+    if not local_path.is_file():
+        raise RuntimeError(f"Delivery refused: local MP4 missing: {local_path}")
+    for key in ("frame_count", "width", "height", "fps", "sha256"):
+        if key not in video_info:
+            raise RuntimeError(f"Delivery refused: video_info lacks {key}")
+    if (video_info["frame_count"], video_info["width"], video_info["height"]) != (274, 1080, 1920):
+        raise RuntimeError("Delivery refused: local video failed final dimensions/frames")
+    if sha256_file(local_path) != video_info["sha256"]:
+        raise RuntimeError(f"Delivery refused: local MP4 SHA-256 does not match validated video_info: {local_path}")
+    return local_path
+
+
+def _recorded_delivery(run_id: str) -> str | None:
+    """Manifest-recorded Drive file id for this run, if a previous
+    delivery already recorded one. Best-effort: no manifest (or no id)
+    simply means 'nothing recorded'."""
+    try:
+        from h3_run_manifest import load_run_manifest
+
+        artifacts = load_run_manifest(ROOT, run_id).get("artifacts") or {}
+        return artifacts.get("drive_file_id") or None
+    except Exception:
+        return None
+
+
+def _existing_delivery_evidence(variant: str, run_id: str, video_info: dict,
+                                 drive_file_id: str, drive_output_folder_id: str | None,
+                                 reused_via: str) -> dict:
+    """Delivery evidence for a server-verified file that already exists:
+    same shape as a fresh upload, plus reuse markers so callers and
+    tests can tell no new upload happened."""
+    return {
+        "variant": variant, "run_id": run_id,
+        "local_video_validated": True,
+        "drive_file_id": drive_file_id,
+        "drive_upload_verified": True,
+        "frames": video_info["frame_count"], "width": video_info["width"],
+        "height": video_info["height"], "fps": video_info["fps"],
+        "sha256": video_info["sha256"],
+        "drive_output_folder_id": drive_output_folder_id,
+        "state": "DELIVERY_COMPLETED",
+        "reused_existing": True,
+        "reused_via": reused_via,
+    }
+
+
+def deliver_variant_to_drive_idempotent(variant: str, run_id: str, video_info: dict,
+                                        archive_fn=None, max_attempts: int = 3) -> dict:
+    """Idempotent delivery (TASK-005 §5, Issue #28). Before uploading, a
+    manifest-recorded drive_file_id is server-verified (size + MD5
+    against the local file via drive_api.verify_uploaded_file) and reused
+    when it matches — this covers the 'upload succeeded but the client
+    never got the receipt' case, where the manifest already holds the id
+    but the run was never marked delivered.
+
+    A recorded id that does NOT verify is an explicit error, never a
+    silent re-upload (the recorded file may be a different video, or the
+    manifest may be stale). With no recorded id, the upload path runs:
+    upload_one itself reuses a same-name/same-MD5 file in the run folder
+    and refuses to overwrite different content, so a retry never creates
+    a duplicate or clobbers a correct file."""
+    from drive_api import verify_uploaded_file
+    from drive_depot import drive_service
+
+    local_path = _validate_delivery_inputs(variant, run_id, video_info)
+    recorded_id = _recorded_delivery(run_id)
+    if recorded_id:
+        service = drive_service()
+        try:
+            verify_uploaded_file(service, recorded_id, local_path)
+        except Exception as e:  # noqa: BLE001 - explicit, never silent
+            raise RuntimeError(
+                f"Recorded Drive file {recorded_id} for run {run_id} does not "
+                f"verify against the local MP4 ({e}); refusing to silently "
+                f"re-upload. Inspect the Drive file before re-delivering.") from e
+        manifest_artifacts = {}
+        try:
+            from h3_run_manifest import load_run_manifest
+
+            manifest_artifacts = load_run_manifest(ROOT, run_id).get("artifacts") or {}
+        except Exception:
+            pass
+        return _existing_delivery_evidence(
+            variant, run_id, video_info, recorded_id,
+            manifest_artifacts.get("drive_output_folder_id"), "recorded_id")
+    return deliver_variant_to_drive(variant, run_id, video_info,
+                                    archive_fn=archive_fn, max_attempts=max_attempts)
+
+
 def deliver_variant_to_drive(variant: str, run_id: str, video_info: dict,
                              archive_fn=None, max_attempts: int = 3) -> dict:
     """Archive a locally validated MP4 to Drive AFTER the GPU is stopped.
@@ -688,28 +784,20 @@ def deliver_variant_to_drive(variant: str, run_id: str, video_info: dict,
     archive_variant_to_drive() is what makes drive_upload_verified true —
     a bare upload return is never enough.
 
-    Delivery states (TASK-002 §4.5): INFERENCE_COMPLETED /
+    Delivery states (TASK-002 §4.5, TASK-005 §5): INFERENCE_COMPLETED /
     REMOTE_MP4_VALIDATED / LOCAL_MP4_DOWNLOADED / LOCAL_MP4_VALIDATED are
     recorded by run_variant before this call; this helper covers
-    DRIVE_UPLOAD_STARTED / DRIVE_UPLOAD_VERIFIED / DELIVERY_COMPLETED.
+    DURABLE_UPLOAD_STARTED (first attempt) / DURABLE_UPLOAD_VERIFIED
+    (server-confirmed) in the manifest, and the caller records DELIVERED
+    when it marks DRIVE_VERIFIED.
 
     On failure after max_attempts it raises RuntimeError stating the
     local MP4 path: the GPU is already stopped, so the correct recovery
     is an archive-only retry — never a re-run of the inference.
     """
-    from h3_contract import sha256_file
-
     archive_fn = archive_fn or archive_variant_to_drive
-    local_path = OUTPUT_ROOT / run_id / f"{variant}.mp4"
-    if not local_path.is_file():
-        raise RuntimeError(f"Delivery refused: local MP4 missing: {local_path}")
-    for key in ("frame_count", "width", "height", "fps", "sha256"):
-        if key not in video_info:
-            raise RuntimeError(f"Delivery refused: video_info lacks {key}")
-    if (video_info["frame_count"], video_info["width"], video_info["height"]) != (274, 1080, 1920):
-        raise RuntimeError("Delivery refused: local video failed final dimensions/frames")
-    if sha256_file(local_path) != video_info["sha256"]:
-        raise RuntimeError(f"Delivery refused: local MP4 SHA-256 does not match validated video_info: {local_path}")
+    local_path = _validate_delivery_inputs(variant, run_id, video_info)
+    _manifest_update(run_id, artifacts={"delivery_state": "DURABLE_UPLOAD_STARTED"})
     last_error = None
     for attempt in range(1, max_attempts + 1):
         record({"event": "drive_upload_started", "variant": variant, "run_id": run_id, "attempt": attempt})
@@ -731,6 +819,7 @@ def deliver_variant_to_drive(variant: str, run_id: str, video_info: dict,
             }
             record({"event": "drive_upload_verified", "variant": variant, "run_id": run_id,
                     "drive_file_id": entry["drive_file_id"]})
+            _manifest_update(run_id, artifacts={"delivery_state": "DURABLE_UPLOAD_VERIFIED"})
             return evidence
         except Exception as e:  # noqa: BLE001 - retry, then report the last error
             last_error = e
@@ -1054,7 +1143,7 @@ def _archive_local_mp4(variant: str, run_id: str) -> dict:
     from h3_video_qa import validate_final_video
 
     info = validate_final_video(OUTPUT_ROOT / run_id / f"{variant}.mp4")
-    return deliver_variant_to_drive(variant, run_id, info)
+    return deliver_variant_to_drive_idempotent(variant, run_id, info)
 
 
 def _resume_archive_only(args, manifest: dict) -> dict:
@@ -1071,7 +1160,8 @@ def _resume_archive_only(args, manifest: dict) -> dict:
     _manifest_update(run_id, task_state="DRIVE_VERIFIED",
                      last_verified_stage="DRIVE_VERIFIED",
                      artifacts={"drive_file_id": delivery.get("drive_file_id"),
-                                "drive_output_folder_id": delivery.get("drive_output_folder_id")},
+                                "drive_output_folder_id": delivery.get("drive_output_folder_id"),
+                                "delivery_state": "DELIVERED"},
                      reopen=True)  # COMPLETED_AWAITING_ARCHIVE is terminal; resume reopens it.
     _manifest_update(run_id, task_state="TASK_COMPLETED")
     return {"resumed": True, "run_id": run_id, "variant": variant,
@@ -1097,7 +1187,8 @@ def _resume_stopped_session(args, manifest: dict) -> dict:
         _manifest_update(run_id, task_state="DRIVE_VERIFIED",
                          last_verified_stage="DRIVE_VERIFIED",
                          artifacts={"drive_file_id": delivery.get("drive_file_id"),
-                                    "drive_output_folder_id": delivery.get("drive_output_folder_id")})
+                                    "drive_output_folder_id": delivery.get("drive_output_folder_id"),
+                                    "delivery_state": "DELIVERED"})
         _manifest_update(run_id, task_state="TASK_COMPLETED")
         return {"resumed": True, "run_id": run_id, "variant": variant,
                 "outcome": "session stopped; validated local MP4 archived",
@@ -1159,7 +1250,8 @@ def _resume_finish(args, manifest: dict, worker_state: dict) -> dict:
     _manifest_update(run_id, task_state="VIDEO_VALIDATED",
                      last_verified_stage="VIDEO_VALIDATED",
                      artifacts={"local_sha256": info["sha256"],
-                                "local_frames": info["frame_count"]})
+                                "local_frames": info["frame_count"],
+                                "delivery_state": "COMPLETE_LOCAL"})
     _manifest_update(run_id, task_state="ARTIFACT_DURABLE")
     live = inspect()
     production_result = {
@@ -1180,7 +1272,7 @@ def _resume_finish(args, manifest: dict, worker_state: dict) -> dict:
         raise RuntimeError("Stop not verified; run FAILED regardless of generated files")
     _manifest_update(run_id, task_state="GPU_STOP_CONFIRMED", session_state="STOPPED")
     try:
-        delivery = deliver_variant_to_drive(variant, run_id, info)
+        delivery = deliver_variant_to_drive_idempotent(variant, run_id, info)
     except Exception as e:  # noqa: BLE001 - video is durable locally
         _manifest_update(run_id, task_state="COMPLETED_AWAITING_ARCHIVE",
                          last_error=str(e)[:500])
@@ -1189,7 +1281,8 @@ def _resume_finish(args, manifest: dict, worker_state: dict) -> dict:
     _manifest_update(run_id, task_state="DRIVE_VERIFIED",
                      last_verified_stage="DRIVE_VERIFIED",
                      artifacts={"drive_file_id": delivery.get("drive_file_id"),
-                                "drive_output_folder_id": delivery.get("drive_output_folder_id")})
+                                "drive_output_folder_id": delivery.get("drive_output_folder_id"),
+                                "delivery_state": "DELIVERED"})
     _manifest_update(run_id, task_state="TASK_COMPLETED")
     return production_result
 
@@ -1664,7 +1757,8 @@ def run_variant(args) -> dict:
                 raise
             record({"event": "worker_done", "variant": variant, "session": session, "done": done_info})
             _manifest_update(args.run_id, task_state="INFERENCE_COMPLETED",
-                             last_verified_stage="INFERENCE_COMPLETED")
+                             last_verified_stage="INFERENCE_COMPLETED",
+                             artifacts={"delivery_state": "TEMPORARY"})
             record({"event": "delivery_state", "variant": variant, "run_id": args.run_id, "state": "INFERENCE_COMPLETED"})
             # Independent remote verification of the real MP4 BEFORE any
             # download: the file must exist and ffprobe must read exactly
@@ -1685,7 +1779,8 @@ def run_variant(args) -> dict:
             _manifest_update(args.run_id, task_state="VIDEO_VALIDATED",
                              last_verified_stage="VIDEO_VALIDATED",
                              artifacts={"local_sha256": info["sha256"],
-                                        "local_frames": info["frame_count"]})
+                                        "local_frames": info["frame_count"],
+                                        "delivery_state": "COMPLETE_LOCAL"})
             # The local MP4 is now on Muse-controlled persistent storage:
             # the artifact is durable before the GPU stop (TASK-005 §5).
             _manifest_update(args.run_id, task_state="ARTIFACT_DURABLE")
@@ -1756,11 +1851,11 @@ def run_variant(args) -> dict:
     if production_result.get("delivery", {}).get("state") != "LOCAL_MP4_VALIDATED":
         raise RuntimeError("Local MP4 not validated; refusing Drive archive")
     # The GPU is stopped and verified at this point, so the Drive upload
-    # burns no CU. Bounded retries inside deliver_variant_to_drive; on
+    # burns no CU. Bounded retries inside the idempotent deliver; on
     # failure the local MP4 is preserved and the error directs an
     # archive-only retry — never a re-run of the inference.
     try:
-        delivery = deliver_variant_to_drive(variant, production_result["run_id"], production_result["video"])
+        delivery = deliver_variant_to_drive_idempotent(variant, production_result["run_id"], production_result["video"])
     except Exception as e:
         # The video is durable locally; the terminal state is
         # COMPLETED_AWAITING_ARCHIVE (archive-only retry), not FAILED.
@@ -1771,7 +1866,8 @@ def run_variant(args) -> dict:
     _manifest_update(args.run_id, task_state="DRIVE_VERIFIED",
                      last_verified_stage="DRIVE_VERIFIED",
                      artifacts={"drive_file_id": delivery.get("drive_file_id"),
-                                "drive_output_folder_id": delivery.get("drive_output_folder_id")})
+                                "drive_output_folder_id": delivery.get("drive_output_folder_id"),
+                                "delivery_state": "DELIVERED"})
     _manifest_update(args.run_id, task_state="TASK_COMPLETED")
     return production_result
 
