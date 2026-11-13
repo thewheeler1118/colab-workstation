@@ -161,3 +161,77 @@ def validate_final_video(path: Path) -> dict:
             f"{EXPECTED_WIDTH}x{EXPECTED_HEIGHT} {EXPECTED_FPS}fps {EXPECTED_FRAMES} frames"
         )
     return info
+
+
+# Story checks that automated QA cannot decide (TASK-003 §3-4). They need a
+# human look at the contact sheet; they stay UNREVIEWED until a reviewer
+# marks them. A technical pass is never presented as a content pass.
+CONTENT_CHECKS = [
+    "bull_charge_1_and_dodge",
+    "bull_charge_2_and_dodge",
+    "cheetah_appearance",
+    "no_text_ghosting",
+    "ending_basketball_raise",
+]
+
+
+def build_qa_report(mp4: Path, original_poster: Path | None = None,
+                    run_id: str = "", qa_dir: Path | None = None) -> dict:
+    """Run the technical QA steps and return a report that keeps technical
+    acceptance and content (story) acceptance separate.
+
+    Only the four real QA functions are used (validate_final_video,
+    extract_qa_frames, build_contact_sheet, compare_poster_tail). The
+    function never raises for a failed video: a technical failure is
+    recorded in technical_acceptance and the report is returned, so the
+    caller can archive it and a human can review it.
+    """
+    mp4 = Path(mp4)
+    report = {
+        "run_id": run_id,
+        "video": str(mp4),
+        "technical_acceptance": {"status": "NOT_RUN"},
+        "content_acceptance": {
+            "status": "CONTENT_REVIEW_REQUIRED",
+            "checks": {name: "UNREVIEWED" for name in CONTENT_CHECKS},
+            "note": "Story checks need a human look at the contact sheet; "
+                    "automated QA cannot confirm them.",
+        },
+        "artifacts": {},
+    }
+    try:
+        info = validate_final_video(mp4)
+    except Exception as e:  # noqa: BLE001 - a failed video is a report, not a crash
+        report["technical_acceptance"] = {
+            "status": "FAILED", "error": str(e)[:500],
+            "tail_psnr_db": None, "tail_pass": None,
+        }
+        return report
+    technical = {
+        "status": "PASSED",
+        "frames": info["frame_count"], "width": info["width"],
+        "height": info["height"], "fps": info["fps"],
+        "duration": info["duration"], "size": info["size"],
+        "sha256": info["sha256"], "technical_pass": info["technical_pass"],
+        "tail_psnr_db": None, "tail_pass": None,
+    }
+    if original_poster is not None:
+        tail = compare_poster_tail(mp4, Path(original_poster))
+        technical["tail_psnr_db"] = tail.get("psnr_db")
+        technical["tail_pass"] = tail.get("pass")
+        if not tail.get("pass"):
+            technical["status"] = "FAILED"
+            technical["error"] = "poster-tail PSNR check failed"
+    if qa_dir is not None:
+        try:
+            frames = extract_qa_frames(mp4, Path(qa_dir) / "frames")
+            sheet = build_contact_sheet(frames, Path(qa_dir) / "contact_sheet.png")
+            report["artifacts"] = {
+                "qa_frames": [str(f) for f in frames],
+                "contact_sheet": str(sheet),
+            }
+        except Exception as e:  # noqa: BLE001 - extraction failure is a technical failure
+            technical["status"] = "FAILED"
+            technical["error"] = f"QA frame extraction failed: {e}"[:500]
+    report["technical_acceptance"] = technical
+    return report

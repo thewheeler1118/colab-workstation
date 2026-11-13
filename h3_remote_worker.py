@@ -779,7 +779,9 @@ def main():
         set_stage('assemble_mp4')
         final=ROOT/'output'/f'shao_nian_h3_{version}.mp4'
         info=assemble_video(source,ROOT/'poster.jpg',final)
-        print('MP4_WRITTEN',str(final),final.stat().st_size,info.get('frame_count'),flush=True)
+        # assemble_video returns 'frames' (see assemble.py); the old
+        # 'frame_count' key printed None here (TASK-003 §3).
+        print('MP4_WRITTEN',str(final),final.stat().st_size,info.get('frames'),flush=True)
         (ROOT/'output'/f'{version}.json').write_text(json.dumps(info,ensure_ascii=False,indent=2))
         set_stage('done')
         print('MUSE_H3_DONE_JSON:'+json.dumps(info,ensure_ascii=False),flush=True)

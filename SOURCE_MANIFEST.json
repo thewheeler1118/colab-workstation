@@ -1,5 +1,5 @@
 {
-  "generated_utc": "2026-11-12",
+  "generated_utc": "2026-11-13",
   "source": "~/workspace/Muse_Colab_H3_Drive_v3/ (production baseline; verbatim copies SHA-256-verified at migration)",
   "note": "Every file in this repo except SOURCE_MANIFEST.json itself. Regenerate after any change; verify with scripts/verify_manifest.py. Excluded by policy and therefore absent: model weights, poster binary, MP4s, live ledgers/sessions/depot state, .venv, __pycache__.",
   "files": [
@@ -413,8 +413,8 @@
     },
     {
       "path": "docs/module_inventory.md",
-      "size_bytes": 30503,
-      "sha256": "1b2fa41881d404aa0179d2502d2409d62bc5c5767903b34a2e1d09fb9ab15cbc",
+      "size_bytes": 30846,
+      "sha256": "4e8f32db2a38e581a51f98173d26559bacf3567889fbed5313a5eb0a0836ab60",
       "role": "Module inventory (this table's source of truth for hashes)"
     },
     {
@@ -545,8 +545,8 @@
     },
     {
       "path": "h3_controller.py",
-      "size_bytes": 64428,
-      "sha256": "2bc7792b3066495db1c1b7a46882fb7b6debbbfa0f4220bb97fbe342ce20da38",
+      "size_bytes": 66136,
+      "sha256": "1955c69156409e7702f3d3c697283b0c4616720f1af94767448e07462aa8d8ea",
       "role": "Run orchestration: preflight, allocation, mount, worker exec, download, stop"
     },
     {
@@ -593,8 +593,8 @@
     },
     {
       "path": "h3_remote_worker.py",
-      "size_bytes": 40886,
-      "sha256": "5739f060cca64ded6dd982b78e3af727129d9420833ff2a6f2d1a1b1e47f544f",
+      "size_bytes": 41012,
+      "sha256": "867a98456c47141b026390c166186984489bebbfd578c18e3fa979549790abf0",
       "role": "Remote ComfyUI worker: restore, inference, find_rendered_video, assemble"
     },
     {
@@ -611,8 +611,8 @@
     },
     {
       "path": "h3_video_qa.py",
-      "size_bytes": 6370,
-      "sha256": "79bab6d77c37e837c066ca762684d479e20867564e7790be44834510241236be",
+      "size_bytes": 9476,
+      "sha256": "64c6666c538a3dce1e291e44f0ea671373dff8445b4296684756a2f520ca7fe7",
       "role": "Local final-video validation + poster-tail PSNR QA"
     },
     {
@@ -833,8 +833,8 @@
     },
     {
       "path": "tests/test_drive_delivery.py",
-      "size_bytes": 6661,
-      "sha256": "8235e427092ffcca6fc4fc028ffbf91907d30b27146933b31903a3863b5435a8",
+      "size_bytes": 18296,
+      "sha256": "c8e70c634e2540fb06afb2956fb81042e702ff107254ba8ee88328b88d788f32",
       "role": "Tests"
     },
     {
@@ -866,6 +866,12 @@
       "size_bytes": 42074,
       "sha256": "6f21e909f06979c97c37a91f5d2a8f6a8003c5e72d7b2186728b90220fe90bd1",
       "role": "Tests: production flow incl. worker marker, stop, parsers (63 tests)"
+    },
+    {
+      "path": "tests/test_h3_video_qa.py",
+      "size_bytes": 5299,
+      "sha256": "d992f59a9f6f95cbb73f4377b8191584402e61f47b1d6f86ca6d2f2d9854f94d",
+      "role": "Tests"
     },
     {
       "path": "tests/test_savevideo_history.py",

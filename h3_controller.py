@@ -898,7 +898,12 @@ def run_variant(args) -> dict:
     created = False
     allocation_attempted = False
     stop_ok = False
-    result = None
+    # TASK-003 (Issue #18): the production result and the stop result are
+    # separate names. The old code reused `result` for both, so the outer
+    # finally overwrote the production dict (run_id, video) with the stop
+    # dict and the delivery call below raised KeyError on the success path.
+    production_result = None
+    stop_result = None
     gpu_info = None
     chosen_key = None
     attempts = []
@@ -1098,7 +1103,7 @@ def run_variant(args) -> dict:
             # No return here: the GPU must be stopped (outer finally) BEFORE
             # any Drive upload. The result is stored and delivered after the
             # stop is verified; see the tail of this function.
-            result = {
+            production_result = {
                 "variant": variant, "run_id": args.run_id, "session": session, "gpu": gpu_info,
                 "attempts": attempts, "video": info, "ledger": {k: v for k, v in ledger.items() if not k.startswith("_")},
                 "live_balance_cu": live["cu_balance"], "live_rate_cu_h": live["rate"],
@@ -1114,8 +1119,8 @@ def run_variant(args) -> dict:
             _EXEC_LOG_DIR = None
     finally:
         if allocation_attempted and session is not None:
-            result = stop_and_verify_session(session)
-            stop_ok = result["stopped_confirmed"]
+            stop_result = stop_and_verify_session(session)
+            stop_ok = stop_result["stopped_confirmed"]
             from h3_session_watchdog import mark_session_stopped
 
             try:
@@ -1128,15 +1133,20 @@ def run_variant(args) -> dict:
         raise RuntimeError("GPU allocation did not complete; repeated session checks found no allocation, but delayed assignment remains possible. Recheck sessions later.")
     if not stop_ok:
         raise RuntimeError("Stop not verified; run FAILED regardless of generated files")
-    if result is None:
+    if production_result is None:
         raise RuntimeError("run_variant reached unreachable state")
+    # Archive only when the stop is confirmed AND the local MP4 was
+    # validated: production_result is built only after
+    # download_and_validate_variant and the LOCAL_MP4_VALIDATED state.
+    if production_result.get("delivery", {}).get("state") != "LOCAL_MP4_VALIDATED":
+        raise RuntimeError("Local MP4 not validated; refusing Drive archive")
     # The GPU is stopped and verified at this point, so the Drive upload
     # burns no CU. Bounded retries inside deliver_variant_to_drive; on
     # failure the local MP4 is preserved and the error directs an
     # archive-only retry — never a re-run of the inference.
-    delivery = deliver_variant_to_drive(variant, result["run_id"], result["video"])
-    result["delivery"] = delivery
-    return result
+    delivery = deliver_variant_to_drive(variant, production_result["run_id"], production_result["video"])
+    production_result["delivery"] = delivery
+    return production_result
 
 
 def test_or_run(args):
@@ -1154,6 +1164,22 @@ def test_or_run(args):
         result = preflight(args)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
+    if args.action == "archive":
+        # TASK-003 §1: archive-only retry. No GPU, no session, no ledger:
+        # re-validate the local MP4 (raises unless it is the validated
+        # 274-frame final video) and run the deliver helper, which re-proves
+        # the file and uploads with bounded retries. Use after a run whose
+        # local MP4 survived but whose Drive upload failed.
+        from h3_video_qa import validate_final_video
+
+        if not args.variant:
+            raise ValueError("--variant A|B is required for archive")
+        if not args.run_id:
+            raise ValueError("--run-id is required for archive")
+        info = validate_final_video(OUTPUT_ROOT / args.run_id / f"{args.variant}.mp4")
+        delivery = deliver_variant_to_drive(args.variant, args.run_id, info)
+        print(json.dumps(delivery, ensure_ascii=False, indent=2))
+        return delivery
     if args.action != "run":
         raise ValueError("Unknown action")
     result = run_variant(args)
@@ -1163,7 +1189,7 @@ def test_or_run(args):
 def main():
     global _COLAB_AUTH, PRODUCTION_TASK_ID, LEDGER_PATH, PRIOR_TASK_UNBILLED_RESERVE_CU
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["plan", "check", "run", "preflight"])
+    parser.add_argument("action", choices=["plan", "check", "run", "preflight", "archive"])
     parser.add_argument("--colab-auth", choices=("oauth2", "adc"), default="adc")
     parser.add_argument("--workflow-api", default=str(ROOT / "workflow_api.json"))
     parser.add_argument("--cache-manifest", default=str(ROOT / "model_cache" / "verified_manifest.json"))
@@ -1197,10 +1223,10 @@ def main():
         PRODUCTION_TASK_ID = a.production_task_id
         LEDGER_PATH = ledger_path_for_task(ROOT, PRODUCTION_TASK_ID)
     PRIOR_TASK_UNBILLED_RESERVE_CU = float(a.prior_unbilled_reserve_cu)
-    if a.action == "run" and not a.variant:
-        parser.error("--variant A|B is required for run")
-    if a.action == "run" and not a.run_id:
-        parser.error("--run-id is required for run")
+    if a.action in ("run", "archive") and not a.variant:
+        parser.error("--variant A|B is required for run/archive")
+    if a.action in ("run", "archive") and not a.run_id:
+        parser.error("--run-id is required for run/archive")
     if a.action == "preflight" and not a.run_id:
         a.run_id = create_run_id()
     try:
