@@ -14,15 +14,17 @@ Schema (one JSON file per run_id, atomically written):
     last_verified_stage, last_error, artifacts, budget,
     recovery_generation, created_at_utc, updated_at_utc
 
-Schema versions (TASK-006 P1-A, Issue #48): v1 manifests (no
-schema_version key) load unchanged; new fields default safely
-(delivery_state absent, drive_verified_before_stop False,
+Schema versions (TASK-006 P1-A, Issue #48; P1-B, Issue #50): v1
+manifests (no schema_version key) load unchanged; new fields default
+safely (delivery_state absent, drive_verified_before_stop False,
 remote_upload absent). v2 adds: schema_version 2, the worker-side
 artifact axis in artifacts (delivery_state REMOTE_UPLOAD_STARTED /
 REMOTE_UPLOAD_VERIFIED, remote_upload evidence, drive_verified_before_stop),
 and the TASK_COMPLETED gate now requires session_state == STOPPED as
-well as task_state == DRIVE_VERIFIED. Old manifests are never
-rewritten; a v1 manifest is upgraded in place only when update_run
+well as task_state == DRIVE_VERIFIED. v3 adds: schema_version 3, the
+bootstrap state machine (manifest["bootstrap"]) and the last transient
+error (manifest["last_transient_error"]). Old manifests are never
+rewritten; a v1/v2 manifest is upgraded in place only when update_run
 writes it again, and then only by adding the new fields.
 
 Rules:
@@ -174,8 +176,10 @@ def create_run_manifest(root: Path, production_task_id: str, run_id: str,
         raise FileExistsError(f"run manifest already exists for {run_id}; use resume, not re-create")
     now = _utc_now()
     manifest = {
-        # TASK-006 P1-A: schema_version 2 (missing key means v1).
-        "schema_version": 2,
+        # TASK-006 P1-B: schema_version 3 (missing key means v1; 2 means
+        # the P1-A fields). v3 adds the bootstrap state machine and the
+        # last transient error (see update_run).
+        "schema_version": 3,
         "production_task_id": production_task_id,
         "run_id": run_id,
         "variant": variant,
@@ -188,6 +192,13 @@ def create_run_manifest(root: Path, production_task_id: str, run_id: str,
         "last_heartbeat_utc": now,
         "last_verified_stage": "TASK_AUTHORIZED",
         "last_error": None,
+        # TASK-006 P1-B: the last transient (network/timeout) error, if
+        # any. A transient is recorded, never a failure: it never moves
+        # task_state and never sets last_error.
+        "last_transient_error": None,
+        # TASK-006 P1-B: bootstrap progress between GPU_ALLOCATED and
+        # WORKER_STARTED (see docs/p1b-p1c-design.md §2.2).
+        "bootstrap": {"steps": {}, "current_step": None},
         "artifacts": {},
         "budget": budget or {},
         "recovery_generation": 0,
@@ -237,7 +248,8 @@ def update_run(root: Path, run_id: str, task_state: str | None = None,
                last_verified_stage: str | None = None,
                last_error: str | None = None, artifacts: dict | None = None,
                budget: dict | None = None, heartbeat: bool = False,
-               reopen: bool = False) -> tuple[dict, bool, str | None]:
+               reopen: bool = False, bootstrap: dict | None = None,
+               transient_error: str | None = None) -> tuple[dict, bool, str | None]:
     """Idempotent update. Returns (manifest, applied, anomaly).
 
     - task_state moves forward only (by stage index); a backward move is
@@ -254,6 +266,11 @@ def update_run(root: Path, run_id: str, task_state: str | None = None,
     - Terminal states never move again unless reopen=True (resume path).
     - last_verified_stage only moves forward.
     - session_state accepts a SessionState enum or its string value.
+    - `bootstrap` merges into manifest["bootstrap"]: top-level keys
+      replace, the nested "steps" dict merges per step (TASK-006 P1-B).
+    - `transient_error` records manifest["last_transient_error"]
+      (error + timestamp + count). It never moves task_state and never
+      sets last_error: a network timeout is not a task failure.
     - Re-applying the same values is a no-op (applied=False, no anomaly).
     """
     path = _manifest_path(root, run_id)
@@ -359,6 +376,29 @@ def update_run(root: Path, run_id: str, task_state: str | None = None,
             manifest["budget"] = merged
             changed = True
 
+    if bootstrap:
+        # TASK-006 P1-B: merge the bootstrap record. Top-level keys
+        # replace; the nested "steps" dict merges per step, so a
+        # resumed bootstrap keeps the steps it already finished.
+        current_boot = manifest.get("bootstrap") or {"steps": {}, "current_step": None}
+        merged_boot = {**current_boot, **bootstrap}
+        if "steps" in bootstrap:
+            merged_boot["steps"] = {**(current_boot.get("steps") or {}),
+                                    **bootstrap["steps"]}
+        if merged_boot != current_boot:
+            manifest["bootstrap"] = merged_boot
+            changed = True
+
+    if transient_error is not None:
+        # TASK-006 P1-B: a transient error is recorded with a count;
+        # it never moves task_state and never sets last_error.
+        previous = manifest.get("last_transient_error") or {}
+        record = {"error": str(transient_error)[:500], "at_utc": now,
+                  "count": int(previous.get("count") or 0) + 1}
+        if record != previous:
+            manifest["last_transient_error"] = record
+            changed = True
+
     if heartbeat or changed:
         manifest["last_heartbeat_utc"] = now
     if changed:
@@ -403,6 +443,9 @@ def recovery_view(root: Path, run_id: str) -> dict:
             "drive_verified_before_stop": bool(
                 artifacts.get("drive_verified_before_stop", False)),
             "remote_upload": artifacts.get("remote_upload"),
+            # TASK-006 P1-B bootstrap + transient axis (v1/v2 default safely):
+            "bootstrap": manifest.get("bootstrap") or {"steps": {}, "current_step": None},
+            "last_transient_error": manifest.get("last_transient_error"),
             "schema_version": manifest_schema_version(manifest)}
 
 

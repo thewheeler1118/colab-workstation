@@ -394,13 +394,17 @@ class _ChainHarness(unittest.TestCase):
         self._po(hc, "read_live_usage", return_value={"balance": 150.0, "rate": 5.0})
         # Real watchdog functions, redirected onto the temp state file.
         self._real_record = hwd.record_session
+        self._real_confirm = hwd.confirm_session_active
         self._real_mark = hwd.mark_session_stopped
         self._real_update = hwd.update_session_deadline
         self._real_reconcile = hwd.reconcile_on_startup
         self._po(hwd, "record_session",
-                 side_effect=lambda sid, gpu, rid, dl, production_task_id="":
+                 side_effect=lambda sid, gpu, rid, dl, production_task_id="", status="active":
                      self._real_record(sid, gpu, rid, dl, path=self.state_path,
-                                       production_task_id=production_task_id))
+                                       production_task_id=production_task_id,
+                                       status=status))
+        self._po(hwd, "confirm_session_active",
+                 side_effect=lambda sid, path=None: self._real_confirm(sid, path=self.state_path))
         self._po(hwd, "mark_session_stopped",
                  side_effect=lambda sid, cs, path=None: self._real_mark(sid, cs, path=self.state_path))
         self._po(hwd, "update_session_deadline",
@@ -450,8 +454,9 @@ class RunVariantChainStopTest(_ChainHarness):
         rec = self._record()
         self.assertIsNotNone(rec)
         self.assertEqual(rec["status"], "active")
-        # The deadline update (+1) happened; the failed stop marked nothing.
-        self.assertEqual(rec["version"], 2)
+        # The confirm (+1) and deadline update (+1) happened; the failed
+        # stop marked nothing.
+        self.assertEqual(rec["version"], 3)
         self.assertEqual(rec["run_id"], RUN_ID)
         # The watchdog was NOT terminated: it keeps deadline protection.
         self.proc.terminate.assert_not_called()
@@ -471,7 +476,7 @@ class RunVariantChainStopTest(_ChainHarness):
         result = hc.run_variant(_args())
         rec = self._record()
         self.assertEqual(rec["status"], "stopped")
-        self.assertEqual(rec["version"], 3)  # record + deadline update + mark
+        self.assertEqual(rec["version"], 4)  # record + confirm + deadline update + mark
         self.proc.terminate.assert_called_once()
         self.assertEqual(self._events_named("watchdog_left_running"), [])
         self.assertEqual(result["delivery"]["state"], "DELIVERY_COMPLETED")

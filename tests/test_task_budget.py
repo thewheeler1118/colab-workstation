@@ -26,6 +26,7 @@ from h3_budget import (  # noqa: E402
     effective_hard_stop_cu,
     ledger_path_for_task,
     load_or_create_budget_ledger,
+    parse_task_deadline,
     reconcile_budget,
     remaining_project_cu,
 )
@@ -169,6 +170,53 @@ class TaskBudgetTest(unittest.TestCase):
             self.assertEqual(wd.main(), 0)
             fake_watch.assert_called_once()
             self.assertIn("h3-ab-20261112", str(wd.LEDGER_PATH))
+
+
+class TaskDeadlineTest(unittest.TestCase):
+    """TASK-006 P1-C (Issue #50): the task deadline on the ledger."""
+
+    def test_new_ledger_without_deadline_records_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            data = _ledger(d, "h3-ab-20261113", 150.0, "run-1",
+                           authorize_new_task=True)
+            self.assertIsNone(data["deadline_utc"])
+
+    def test_new_ledger_records_deadline(self):
+        with tempfile.TemporaryDirectory() as d:
+            data = _ledger(d, "h3-ab-20261113", 150.0, "run-1",
+                           authorize_new_task=True,
+                           deadline_utc="2026-11-13T20:00:00Z")
+            self.assertEqual(data["deadline_utc"], "2026-11-13T20:00:00Z")
+
+    def test_existing_ledger_adopts_first_deadline_then_refuses_a_move(self):
+        with tempfile.TemporaryDirectory() as d:
+            _ledger(d, "h3-ab-20261113", 150.0, "run-1",
+                    authorize_new_task=True)
+            data = _ledger(d, "h3-ab-20261113", 150.0, "run-2",
+                           deadline_utc="2026-11-13T20:00:00Z")
+            self.assertEqual(data["deadline_utc"], "2026-11-13T20:00:00Z")
+            with self.assertRaisesRegex(RuntimeError, "deadline mismatch"):
+                _ledger(d, "h3-ab-20261113", 150.0, "run-3",
+                        deadline_utc="2026-11-14T20:00:00Z")
+
+    def test_same_deadline_replayed_is_fine(self):
+        with tempfile.TemporaryDirectory() as d:
+            _ledger(d, "h3-ab-20261113", 150.0, "run-1",
+                    authorize_new_task=True,
+                    deadline_utc="2026-11-13T20:00:00Z")
+            data = _ledger(d, "h3-ab-20261113", 150.0, "run-2",
+                           deadline_utc="2026-11-13T20:00:00Z")
+            self.assertEqual(data["deadline_utc"], "2026-11-13T20:00:00Z")
+
+    def test_parse_task_deadline(self):
+        self.assertIsNone(parse_task_deadline(None))
+        self.assertIsNone(parse_task_deadline(""))
+        self.assertEqual(parse_task_deadline("2026-11-13T20:00:00Z"),
+                         "2026-11-13T20:00:00Z")
+        with self.assertRaises(ValueError):
+            parse_task_deadline("2026-11-13 20:00")
+        with self.assertRaises(ValueError):
+            parse_task_deadline("tomorrow")
 
 
 if __name__ == "__main__":

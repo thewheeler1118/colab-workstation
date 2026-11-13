@@ -296,6 +296,9 @@ class RunVariantDeliveryTest(unittest.TestCase):
         self._po(hwd, "record_session",
                  return_value={"started_at_utc": "2026-11-12T00:00:00+00:00",
                                "session_id": SESSION})
+        self._po(hwd, "confirm_session_active",
+                 return_value={"started_at_utc": "2026-11-12T00:00:00+00:00",
+                               "session_id": SESSION, "status": "active"})
         self._po(hwd, "reconcile_on_startup",
                  return_value={"managed_active_sessions": []})
         self._po(hwd, "mark_session_stopped")

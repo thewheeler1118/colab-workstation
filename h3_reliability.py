@@ -1,7 +1,8 @@
-"""TASK-005 §12 (Issue #40): reliability metrics from durable evidence only.
+"""TASK-005 §12 (Issue #40) + TASK-006 P1-C (Issue #50): reliability
+metrics from durable evidence only.
 
-The five brief §12 rates, computed from run manifests, their audit logs,
-and budget ledgers under a root directory. No rate is ever claimed from
+The six rates, computed from run manifests, their audit logs, and
+budget ledgers under a root directory. No rate is ever claimed from
 unit tests, Mock tests, or fault-injection runs: those prove code paths,
 not production reliability.
 
@@ -26,6 +27,30 @@ Definitions
   task ledger exists. The ledger is per-task, so runs inherit their
   task's verdict; runs with no readable ledger are excluded from the
   denominator and listed separately.
+- F deadline_bound_e2e_success_rate (TASK-006 P1-C): production TASKS
+  (not runs) that complete end to end within their deadline / tasks
+  authorised with a budget and a deadline whose deadline has passed
+  or whose runs are all terminal. A task counts only when EVERY
+  started run meets all seven conditions — (1) GPU allocation
+  (session_id + GPU_ALLOCATED stage), (2) model restore+load
+  (MODELS_READY stage), (3) spec-conforming MP4 (VIDEO_VALIDATED
+  stage + local_sha256 + local_frames == 274), (4) MP4 independently
+  verified in persistent storage (DRIVE_VERIFIED stage +
+  delivery_state DELIVERED + drive_file_id), (5) GPU confirmed
+  stopped (GPU_STOP_CONFIRMED stage + session_state STOPPED), (6) CU
+  within the authorised budget (ledger max_observed_spent_cu <=
+  project_budget_cu), (7) final manifest + audit log complete
+  (task_state TASK_COMPLETED + TASK_COMPLETED stage) — AND the task
+  completion time (latest TASK_COMPLETED stage timestamp across its
+  runs) is at or before the deadline. Stuck/over-deadline tasks, lost
+  artifacts, unconfirmed shutdowns, and budget violations are IN the
+  denominator as failures, never silently removed. A task still
+  in-flight before its deadline is excluded and listed separately;
+  a task whose ledger has no deadline (including the historical
+  h3-ab-20261111 ledger) stays OUT of the denominator and is listed
+  separately. A task authorised with a deadline that never started
+  a run is a denominator failure once the deadline has passed (no
+  completion was recorded); before the deadline it is in-flight.
 
 Rules
 -----
@@ -42,22 +67,31 @@ Rules
   Wilson lower bound is >= 0.95. With zero failures that needs about
   73 completed runs (60/60 only reaches a 0.9398 lower bound); any
   failure needs more. The module reports the interval; it never rounds
-  a small-sample rate up to a claim.
+  a small-sample rate up to a claim. Metric F carries its own
+  `target_verified` inside its dict, computed the same way (MEASURED
+  and Wilson lower >= 0.95); the top-level `target_95_verified` keeps
+  its metric-B meaning.
+- Metric F is computed at task scope: a `since`/`until` time filter
+  scopes the runs, so a task with no runs inside the window cannot be
+  judged and is listed separately (`f_time_window_excluded_tasks`)
+  instead of being counted as a failure.
 
 Current honest baseline (2026-11-13): the only real production runs
 (A first-attempt success, B interrupted by a VM restart) predate the
 TASK-005 manifests, so the production sample for the new architecture
-is n = 0 and all five rates are UNKNOWN.
+is n = 0 and all six rates are UNKNOWN.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import math
+from datetime import datetime, timezone
 from pathlib import Path
 
 import h3_run_manifest as rm
 from h3_budget import PROJECT_BUDGET_CU, ledger_path_for_task
+from h3_contract import TOTAL_FRAMES
 
 WILSON_Z = 1.96
 TARGET_RATE = 0.95
@@ -151,18 +185,242 @@ def _ledger_compliant(root: Path, task_id: str) -> bool | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Metric F (TASK-006 P1-C, Issue #50): deadline-bound end-to-end success.
+# ---------------------------------------------------------------------------
+
+def _parse_utc(value) -> datetime | None:
+    """Parse a `YYYY-MM-DDTHH:MM:SSZ` timestamp; None when malformed."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _load_ledger(root: Path, task_id: str) -> dict | None:
+    try:
+        path = ledger_path_for_task(root, task_id)
+        if not path.is_file():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _discover_task_ids(root: Path, manifests: list[dict],
+                       task_filter: str | None) -> list[str]:
+    """Every task id known from a manifest or a ledger file in scope."""
+    if task_filter:
+        return [task_filter]
+    ids = {m.get("production_task_id") for m in manifests
+           if m.get("production_task_id")}
+    try:
+        cache = root / "model_cache"
+        prefix, suffix = "h3_production_budget_", ".json"
+        for path in cache.glob(prefix + "*" + suffix):
+            task_id = path.name[len(prefix):-len(suffix)]
+            if task_id:
+                ids.add(task_id)
+    except Exception:
+        pass
+    return sorted(ids)
+
+
+def _stage_times(root: Path, run_id: str) -> dict[str, list[str]]:
+    """STAGE -> sorted ts_utc list, from the run's audit log."""
+    out: dict[str, list[str]] = {}
+    try:
+        for e in rm.read_audit_log(root, run_id):
+            if e.get("event") != "STAGE":
+                continue
+            stage = (e.get("detail") or {}).get("to")
+            ts = e.get("ts_utc") or ""
+            if stage and ts:
+                out.setdefault(stage, []).append(ts)
+    except Exception:
+        pass
+    for times in out.values():
+        times.sort()
+    return out
+
+
+def _evaluate_run_f(root: Path, manifest: dict) -> list[str]:
+    """Failed F conditions (1-5, 7) for one run; empty = the run meets them."""
+    failed: list[str] = []
+    run_id = manifest.get("run_id") or ""
+    stages = _stage_times(root, run_id)
+    artifacts = manifest.get("artifacts") or {}
+    if not manifest.get("session_id") or "GPU_ALLOCATED" not in stages:
+        failed.append("allocation: no session_id or no GPU_ALLOCATED stage")
+    if "MODELS_READY" not in stages:
+        failed.append("models: no MODELS_READY stage")
+    if ("VIDEO_VALIDATED" not in stages
+            or not artifacts.get("local_sha256")
+            or artifacts.get("local_frames") != TOTAL_FRAMES):
+        failed.append("inference: no VIDEO_VALIDATED stage or local MP4 "
+                      "not spec-conforming (local_sha256 / local_frames)")
+    if ("DRIVE_VERIFIED" not in stages
+            or artifacts.get("delivery_state") != "DELIVERED"
+            or not artifacts.get("drive_file_id")):
+        failed.append("persistence: no DRIVE_VERIFIED stage or "
+                      "delivery_state != DELIVERED or no drive_file_id")
+    if ("GPU_STOP_CONFIRMED" not in stages
+            or manifest.get("session_state") != "STOPPED"):
+        failed.append("shutdown: no GPU_STOP_CONFIRMED stage or "
+                      "session_state != STOPPED")
+    if (manifest.get("task_state") != "TASK_COMPLETED"
+            or "TASK_COMPLETED" not in stages):
+        failed.append("completion: task_state != TASK_COMPLETED or "
+                      "no TASK_COMPLETED stage")
+    return failed
+
+
+def _evaluate_task_f(root: Path, task_id: str, runs: list[dict],
+                     ledger: dict, now_dt: datetime,
+                     time_filter_active: bool) -> dict:
+    """One task's F verdict. `in_denominator` False means the task is
+    listed separately (in-flight / no deadline) and is NOT counted."""
+    deadline_raw = ledger.get("deadline_utc")
+    deadline = _parse_utc(deadline_raw)
+    verdict = {"production_task_id": task_id,
+               "deadline_utc": deadline_raw,
+               "verdict": "failure", "failed_conditions": [],
+               "in_denominator": False, "completed_at_utc": None,
+               "run_ids": sorted(m.get("run_id") or "" for m in runs)}
+    if deadline is None:
+        verdict["excluded_reason"] = ("no deadline recorded on the ledger; "
+                                      "the task is not in the F denominator")
+        return verdict
+    deadline_passed = now_dt >= deadline
+    non_terminal = [m for m in runs
+                    if m.get("task_state") not in rm.TERMINAL_STATES]
+    if not runs and time_filter_active:
+        # A time filter scopes the runs: runs may exist outside the
+        # window, so a zero-run task cannot be judged here.
+        verdict["excluded_reason"] = ("no runs inside the requested time "
+                                      "window; cannot judge")
+        return verdict
+    if not runs and not deadline_passed:
+        verdict["excluded_reason"] = ("no runs started and the deadline "
+                                      "has not passed; in flight")
+        verdict["in_flight"] = True
+        return verdict
+    if non_terminal and not deadline_passed:
+        verdict["excluded_reason"] = ("runs still in flight and the "
+                                      "deadline has not passed")
+        verdict["in_flight"] = True
+        verdict["in_flight_run_ids"] = sorted(
+            m.get("run_id") or "" for m in non_terminal)
+        return verdict
+    verdict["in_denominator"] = True
+    failed: list[str] = []
+    if not runs:
+        failed.append("no runs started before the deadline")
+    for m in runs:
+        run_id = m.get("run_id") or ""
+        if m.get("task_state") not in rm.TERMINAL_STATES:
+            # Past the deadline with a non-terminal run: stuck, a failure.
+            failed.append(f"run {run_id}: not terminal "
+                          f"(task_state={m.get('task_state')})")
+            continue
+        for cond in _evaluate_run_f(root, m):
+            failed.append(f"run {run_id}: {cond}")
+    try:
+        spent = float(ledger.get("max_observed_spent_cu"))
+        budget = float(ledger.get("project_budget_cu", PROJECT_BUDGET_CU))
+        if spent > budget:
+            failed.append(f"budget: max_observed_spent_cu {spent} > "
+                          f"project_budget_cu {budget}")
+    except (TypeError, ValueError):
+        failed.append("budget: ledger spend unreadable")
+    completed_at = None
+    for m in runs:
+        times = _stage_times(root, m.get("run_id") or "").get("TASK_COMPLETED", [])
+        if times:
+            completed_at = times[-1] if completed_at is None \
+                else max(completed_at, times[-1])
+    verdict["completed_at_utc"] = completed_at
+    if completed_at is None:
+        failed.append("completion: no TASK_COMPLETED stage recorded")
+    elif (_parse_utc(completed_at) or datetime.max.replace(tzinfo=timezone.utc)) > deadline:
+        failed.append(f"completion: completed at {completed_at} after "
+                      f"deadline {deadline_raw}")
+    verdict["failed_conditions"] = failed
+    verdict["verdict"] = "success" if not failed else "failure"
+    return verdict
+
+
+def _deadline_bound_e2e(root: Path, manifests: list[dict],
+                        now_dt: datetime,
+                        task_filter: str | None = None,
+                        time_filter_active: bool = False) -> dict:
+    """Metric F plus the per-task verdicts and the excluded-task lists."""
+    verdicts: list[dict] = []
+    in_flight_tasks: list[str] = []
+    deadline_unknown_tasks: list[str] = []
+    window_excluded_tasks: list[str] = []
+    for task_id in _discover_task_ids(root, manifests, task_filter):
+        ledger = _load_ledger(root, task_id)
+        if ledger is None or not ledger.get("authorized"):
+            # No authorisation evidence: not a production task in the
+            # F sense. A manifest without a ledger is listed as unknown
+            # rather than silently dropped.
+            if any(m.get("production_task_id") == task_id for m in manifests):
+                deadline_unknown_tasks.append(task_id)
+            continue
+        runs = [m for m in manifests
+                if m.get("production_task_id") == task_id]
+        verdict = _evaluate_task_f(root, task_id, runs, ledger, now_dt,
+                                   time_filter_active)
+        if not verdict["in_denominator"]:
+            if verdict.get("in_flight"):
+                in_flight_tasks.append(task_id)
+            elif verdict.get("excluded_reason", "").startswith("no runs inside"):
+                window_excluded_tasks.append(task_id)
+            else:
+                deadline_unknown_tasks.append(task_id)
+            continue
+        verdicts.append(verdict)
+    successes = sum(1 for v in verdicts if v["verdict"] == "success")
+    metric = _metric(
+        successes, len(verdicts),
+        "tasks completing allocation + restore + inference + verified "
+        "durable MP4 + confirmed stop within budget and deadline / "
+        "tasks authorised with a budget and a deadline whose deadline "
+        "passed or whose runs are all terminal",
+        unknown_reason="no task in scope was authorised with a budget "
+                       "and a deadline")
+    metric["target_verified"] = bool(
+        metric["status"] == "MEASURED"
+        and metric["confidence_interval_95"] is not None
+        and metric["confidence_interval_95"][0] >= TARGET_RATE)
+    metric["verdicts"] = verdicts
+    return {"metric": metric,
+            "in_flight_tasks": sorted(in_flight_tasks),
+            "deadline_unknown_tasks": sorted(deadline_unknown_tasks),
+            "time_window_excluded_tasks": sorted(window_excluded_tasks)}
+
+
 def compute_reliability(root: str | Path, production_task_id: str | None = None,
                         since: str | None = None, until: str | None = None,
-                        output_root: str | Path | None = None) -> dict:
-    """Compute the five §12 rates over the manifests under `root`.
+                        output_root: str | Path | None = None,
+                        now_utc: str | None = None) -> dict:
+    """Compute the six rates over the manifests under `root`.
 
     `output_root`, when given, is the directory holding
     `<run_id>/<variant>.mp4` files; metric C then also verifies the
     local file still exists with the recorded SHA-256. Without it, C
-    is judged from manifest states only.
+    is judged from manifest states only. `now_utc` (ISO
+    `YYYY-MM-DDTHH:MM:SSZ`) is the "now" for metric F's deadline
+    comparison; it defaults to the current UTC time and exists so
+    tests can fix the clock.
     """
     root = Path(root)
     output_root = Path(output_root) if output_root else None
+    now_dt = _parse_utc(now_utc) or datetime.now(timezone.utc)
     manifests = _load_manifests(root, production_task_id, since, until)
     terminal = [m for m in manifests
                 if m.get("task_state") in rm.TERMINAL_STATES]
@@ -241,6 +499,11 @@ def compute_reliability(root: str | Path, production_task_id: str | None = None,
         "terminal runs with a readable task ledger",
         unknown_reason="no terminal run in scope has a readable task ledger")
 
+    metric_f_result = _deadline_bound_e2e(
+        root, manifests, now_dt, task_filter=production_task_id,
+        time_filter_active=bool(since or until))
+    metric_f = metric_f_result["metric"]
+
     target_verified = bool(
         metric_b["status"] == "MEASURED"
         and metric_b["confidence_interval_95"] is not None
@@ -283,8 +546,12 @@ def compute_reliability(root: str | Path, production_task_id: str | None = None,
             "artifact_preservation_rate": metric_c,
             "verified_shutdown_rate": metric_d,
             "budget_compliance_rate": metric_e,
+            "deadline_bound_e2e_success_rate": metric_f,
         },
         "target_95_verified": target_verified,
         "target_95_evidence": target_evidence,
         "e_unknown_ledger_runs": sorted(e_unknown_runs),
+        "f_in_flight_tasks": metric_f_result["in_flight_tasks"],
+        "f_deadline_unknown_tasks": metric_f_result["deadline_unknown_tasks"],
+        "f_time_window_excluded_tasks": metric_f_result["time_window_excluded_tasks"],
     }

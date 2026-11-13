@@ -43,6 +43,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -153,6 +154,7 @@ class ChainHarness:
         self.ledger_bytes = self.ledger_path.read_bytes()
         # Real watchdog functions, captured BEFORE _install patches them.
         self._real_record = hwd.record_session
+        self._real_confirm_active = hwd.confirm_session_active
         self._real_mark_stopped = hwd.mark_session_stopped
         self._real_update_deadline = hwd.update_session_deadline
         self._real_reconcile = hwd.reconcile_on_startup
@@ -249,6 +251,8 @@ class ChainHarness:
         # (Their path= defaults bind the real STATE_PATH at def time,
         # so they are wrapped, not merely re-pointed.)
         self._po(hwd, "record_session", side_effect=self._wrap_record_session)
+        self._po(hwd, "confirm_session_active",
+                 side_effect=self._wrap_confirm_active)
         self._po(hwd, "mark_session_stopped",
                  side_effect=self._wrap_mark_stopped)
         self._po(hwd, "update_session_deadline",
@@ -399,10 +403,14 @@ class ChainHarness:
 
     # -- real watchdog functions on the temp managed file --------------
     def _wrap_record_session(self, session_id, gpu, run_id, deadline_utc,
-                             production_task_id=""):
+                             production_task_id="", status="active"):
         return self._real_record(session_id, gpu, run_id, deadline_utc,
                                  path=self.state_path,
-                                 production_task_id=production_task_id)
+                                 production_task_id=production_task_id,
+                                 status=status)
+
+    def _wrap_confirm_active(self, session_id, path=None):
+        return self._real_confirm_active(session_id, path=self.state_path)
 
     def _wrap_mark_stopped(self, session_id, confirmed_state=None, path=None):
         return self._real_mark_stopped(session_id, confirmed_state, path=self.state_path)
@@ -648,6 +656,106 @@ class ControllerFaultTest(unittest.TestCase):
         self.assertEqual(h2.allocate_ids, [])
         self.assertEqual(h2.stop_cli_sessions, [session])
         self.assertEqual(len(h2.archive_calls), 1)
+
+    # -- TASK-006 P1-B: restart-safe bootstrap, duplicate-allocation guard --
+    def test_restart_mid_bootstrap(self):
+        # The controller died after init_remote, before the worker was
+        # launched. Resume re-runs the bootstrap idempotently
+        # (init_remote skipped, the rest done once), launches the worker,
+        # and finishes — no second GPU, no re-inference.
+        h = self.h
+        session = self._construct_active_run("GPU_ALLOCATED")
+        rm.update_run(h.root, RUN_ID, bootstrap={
+            "current_step": "init_remote",
+            "steps": {"init_remote": {"state": "done",
+                                      "at_utc": "2026-11-13T09:00:00Z"}}})
+        h2 = h.restart()
+        self.h = h2  # tearDown closes the live harness, not the dead one
+        h2.query_plan = [SessionState.ACTIVE, SessionState.ACTIVE,
+                         SessionState.STOPPED]
+        # First probe: no worker state yet. Second (after the resumed
+        # bootstrap launches the worker): VIDEO_READY.
+        h2.job_probe_states = [
+            "MUSE_H3_JOB_STATE_MISSING",
+            _job_state("VIDEO_READY", output={
+                "file": "/content/muse_h3/output/shao_nian_h3_A.mp4",
+                "frames": 274, "sha256": h2.sha,
+                "seconds": 274 / 24, "with_audio": True}),
+        ]
+        result = h2.resume()
+        self.assertTrue(result.get("resumed"))
+        self.assertEqual(h2.manifest_state()[0], "TASK_COMPLETED")
+        self.assertEqual(h2.manifest()["recovery_generation"], 1)
+        # Exactly one allocation ever (the original); the resume launched
+        # the worker once and stopped the same session.
+        self.assertEqual(h2.allocate_ids, [])
+        self.assertEqual(h2.stop_cli_sessions, [session])
+        self.assertEqual(len(h2.archive_calls), 1)
+        # The bootstrap step record survived and gained launch_worker.
+        steps = h2.manifest()["bootstrap"]["steps"]
+        self.assertEqual(steps["init_remote"]["state"], "done")
+        self.assertEqual(steps["launch_worker"]["state"], "done")
+        h2.assert_mp4_unchanged()
+        h2.assert_ledger_unchanged()
+
+    def test_duplicate_controller_refused_without_allocating(self):
+        # A second controller for the same task while the first holds the
+        # task lock must refuse before allocating anything.
+        h = self.h
+        from h3_task_lock import TaskLock
+        with TaskLock(h.root, TASK):
+            with self.assertRaisesRegex(RuntimeError, "locked by another"):
+                h.run()
+        self.assertEqual(h.allocate_ids, [])
+        # Nothing was created: the lock is taken before the manifest.
+        self.assertFalse((h.root / "model_cache" / "run_manifests"
+                          / f"{RUN_ID}.json").exists())
+
+    def test_transient_poll_failures_recover(self):
+        # Three dead probes (the degrade threshold) then a live one: the
+        # run records the degradation as a transient and still completes.
+        h = self.h
+        h.job_probe_states = ["MUSE_H3_JOB_STATE_MISSING"] * 3
+        result = h.run()
+        self.assertEqual(h.manifest_state()[0], "TASK_COMPLETED")
+        self.assertEqual(result["delivery"]["drive_file_id"], "drive-file-1")
+        manifest = h.manifest()
+        self.assertIsNotNone(manifest.get("last_transient_error"))
+        self.assertIn("poll degraded",
+                      manifest["last_transient_error"]["error"])
+        self.assertIn("poll_degraded", h.audit_jsonl_text())
+        self.assertEqual(len(h.allocate_ids), 1)
+        self.assertEqual(len(h.stop_cli_sessions), 1)
+
+    def test_duplicate_recovery_returns_already_completed(self):
+        # Resume twice: the second resume returns already-completed
+        # without allocating, stopping, or re-archiving.
+        h = self.h
+        h.run()
+        self.assertEqual(h.manifest_state()[0], "TASK_COMPLETED")
+        h2 = h.restart()
+        self.h = h2  # tearDown closes the live harness, not the dead one
+        result = h2.resume()
+        self.assertFalse(result.get("resumed"))
+        self.assertIn("already completed", result.get("reason", ""))
+        self.assertEqual(h2.allocate_ids, [])
+        self.assertEqual(h2.archive_calls, [])
+        self.assertEqual(h2.stop_cli_sessions, [])
+
+    def test_drive_verified_but_gpu_unknown_refuses(self):
+        # The video is durable but the GPU state cannot be read — resume
+        # must refuse, never allocate a second GPU, never stop blindly.
+        h = self.h
+        self._construct_active_run("DRIVE_VERIFIED")
+        h2 = h.restart()
+        self.h = h2  # tearDown closes the live harness, not the dead one
+        h2.query_plan = [SessionQueryError("sessions list timed out")]
+        result = h2.resume()
+        self.assertFalse(result.get("resumed"))
+        self.assertIn("UNKNOWN", result.get("reason", ""))
+        self.assertEqual(h2.allocate_ids, [])
+        self.assertEqual(h2.stop_cli_sessions, [])
+        self.assertEqual(h2.archive_calls, [])
 
 
 # ----------------------------------------------------------------------
@@ -954,13 +1062,32 @@ class WorkerFaultTest(unittest.TestCase):
         self.assertEqual(h.archive_calls, [])
 
     def test_control_channel_disconnect(self):
+        # TASK-006 P1-B: a dead control channel is transient, not a task
+        # failure. The poll loop degrades (audit event + manifest
+        # transient error) and keeps polling; only the budget wall time
+        # ends the run. A fake clock advances on every sleep so the wall
+        # time (3600 s, mocked allowed_runtime_seconds) arrives fast.
         h = self.h
-        h.job_probe_states = ["MUSE_H3_JOB_STATE_MISSING"] * 3
-        with self.assertRaises(RuntimeError) as ctx:
-            h.run()
-        self.assertIn("unobservable after 3 consecutive poll failures",
+        h.job_probe_states = ["MUSE_H3_JOB_STATE_MISSING"] * 200
+        now = [time.monotonic()]
+
+        def _sleep(s):
+            now[0] += s
+
+        with mock.patch.object(hc.time, "sleep", side_effect=_sleep), \
+                mock.patch.object(hc.time, "monotonic", side_effect=lambda: now[0]):
+            with self.assertRaises(TimeoutError) as ctx:
+                h.run()
+        self.assertIn("did not finish before the budget wall time",
                       str(ctx.exception))
         self.assertEqual(h.manifest_state()[0], "FAILED")
+        # The run recorded the degradation as a transient, never as the
+        # failure reason (the failure reason is the wall time).
+        manifest = h.manifest()
+        self.assertIsNotNone(manifest.get("last_transient_error"))
+        self.assertIn("poll degraded",
+                      manifest["last_transient_error"]["error"])
+        self.assertIn("poll_degraded", h.audit_jsonl_text())
         # The session was stopped, not left running.
         self.assertEqual(len(h.stop_cli_sessions), 1)
         self.assertEqual(h.archive_calls, [])

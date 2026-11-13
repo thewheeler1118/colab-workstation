@@ -15,9 +15,9 @@ search for in `logs/<run_id>/` and remote stdout.
 | 2 | ACCOUNT_VERIFIED | `h3_controller.run_variant` → `drive_depot.drive_service` + `drive_depot.account_matches` (+ `auth_support.audit_user_adc_file`) | Same Google account for Colab ADC and Drive | `ACCOUNT_MISMATCH` → abort before GPU | None; no GPU yet | `tests/test_h3_production.py::test_same_account_required` | `same_google_account: true` |
 | 3 | DRIVE_READY_VERIFIED | `drive_depot.verify_ready` | Manifest status READY, method drive_v3_server_api, exactly the 4 pinned files, same depot root, remote READY doc re-fetched (size + MD5 match) | Any mismatch raises RuntimeError | None; no GPU yet | `tests/test_drive_depot.py`, `tests/test_h3_production.py::test_drive_ready_required_before_gpu` | `{"ready": true, "files": 4, "bytes": 40073842159}` |
 | 4 | BUDGET_INITIALIZED | `h3_controller.initialize_project_budget` → `h3_budget.load_or_create_budget_ledger` | Ledger created/baselined on live `colab usage` balance; hard_stop = balance − 30.00 CU (+ 0.14 prior unbilled reserve) | Ledger cap ≠ 30.0 raises; balance unparsable raises | None | `tests/test_h3_mount_repair.py::test_ledger_survives_restart_baseline_unchanged` | ledger JSON in `model_cache/` |
-| 5 | GPU_ALLOCATING | `h3_controller.run_variant` allocation loop → `h3_budget.choose_gpu_candidate` + `h3_budget.allocation_command` + `h3_controller.run_cli` (`colab new`, timeout 420s) | `colab new` exits 0; session recorded (`allocated` event); lease registered (`h3_gpu_lease_registry.register_lease`, TASK-006 P0-C) before watchdog start — a local registry failure aborts the run and the outer finally stops the session | 503 capacity → next attempt (max 3: G4, G4, A100_HIGH_MEM); transport error → same G4 once only; late allocation detected via `inspect()` → abort | 3 attempts; CLI-internal G4 503 retries (up to 3, 30s each + 10/20/40s backoff); 420s per `new` | allocation-plan tests in `tests/test_h3_production.py`; lease registration in `tests/test_gpu_lease_registry.py` | `allocation_attempt`, `allocated` |
+| 5 | GPU_ALLOCATING | `h3_controller.run_variant` allocation loop → `h3_budget.choose_gpu_candidate` + `h3_budget.allocation_command` + `h3_controller.run_cli` (`colab new`, timeout 420s) | `colab new` exits 0; session pre-registered as `allocating` BEFORE the `new` call and confirmed `active` after it (TASK-006 P1-B, Issue #50) — a controller that dies mid-allocation leaves an `allocating` record, which `reconcile_on_startup` resolves by live query (ACTIVE → blocks new allocation, STOPPED/not-found → `allocation_failed`, UNKNOWN → raises and blocks); lease registered (`h3_gpu_lease_registry.register_lease`, TASK-006 P0-C) before watchdog start — a local registry failure aborts the run and the outer finally stops the session | 503 capacity → next attempt (max 3: G4, G4, A100_HIGH_MEM); transport error → same G4 once only; late allocation detected via `inspect()` → abort | 3 attempts; CLI-internal G4 503 retries (up to 3, 30s each + 10/20/40s backoff); 420s per `new` | allocation-plan tests in `tests/test_h3_production.py`; lease registration in `tests/test_gpu_lease_registry.py`; allocating records in `tests/test_session_state_tristate.py` | `allocation_attempt`, `allocated` |
 | 6 | GPU_VERIFIED | `h3_controller.probe_actual_gpu` → remote `h3_gpu_probe.py` (`nvidia-smi`, `H3_GPU_CHOICE` env) | Name tokens match (G4: RTX PRO 6000 + BLACKWELL; A100: A100) and VRAM ≥ min (G4 92160 MiB, A100_HIGH_MEM 76800 MiB); live rate ≤ 14.0 CU/h | Hardware mismatch / VRAM short / rate unknown or > 14.0 → abort | Bounded retries on read timeout (timeout=10); probe exec timeout 180s | (live-only; policy constants in `tests/test_config_contract.py`) | `H3_GPU_EVIDENCE:`, `GPU_H3_G4_OK`, `gpu_probed` |
-| 7 | DRIVE_MOUNTING / DOWNLOAD_PROBE | Default (TASK-006 P0-B, Issue #44): `h3_controller` mints a short-lived read-only Drive token, uploads it (0600) + `h3_drive_download.py`, runs remote `h3_drive_download_probe.py` (1 MiB Range probe, timeout 180s). Legacy mount path only: `h3_controller.mount_drive` / `mount_drive_interactive` (official `colab drivemount`, patched remote `timeout_ms=600000`, local ceiling 660s) after the remote signature probe (`h3_mount_signature_probe.py`, timeout 120s) accepts `timeout_ms` | Default: probe stdout contains `MUSE_DRIVE_DOWNLOAD_PROBE_OK`. Mount: mount completes within `budget_sec` | Default: probe failure raises, GPU released. Mount: signature missing → abort before mount; mount failure raises with timeline | Mount deadline = budget-derived `budget_sec`; local subprocess floor 720s | `tests/test_drive_download.py` (offline simulator); `tests/test_h3_mount_repair.py` (mount: 300s-auth cases, timeline) | `drive_download_probe_ok`, mount timeline JSON |
+| 7 | DRIVE_MOUNTING / DOWNLOAD_PROBE | Bootstrap factored out of `run_variant` into `h3_controller._run_bootstrap` (TASK-006 P1-B, Issue #50): per-step records in the manifest `bootstrap` field (schema v3), skippable steps re-run idempotently on resume, `drive_upload_block` and `drive_download_probe` always re-run. Default (TASK-006 P0-B, Issue #44): `h3_controller` mints a short-lived read-only Drive token, uploads it (0600) + `h3_drive_download.py`, runs remote `h3_drive_download_probe.py` (1 MiB Range probe, timeout 180s). Legacy mount path only: `h3_controller.mount_drive` / `mount_drive_interactive` (official `colab drivemount`, patched remote `timeout_ms=600000`, local ceiling 660s) after the remote signature probe (`h3_mount_signature_probe.py`, timeout 120s) accepts `timeout_ms` | Default: probe stdout contains `MUSE_DRIVE_DOWNLOAD_PROBE_OK`. Mount: mount completes within `budget_sec` | Default: probe failure raises, GPU released. Mount: signature missing → abort before mount; mount failure raises with timeline | Mount deadline = budget-derived `budget_sec`; local subprocess floor 720s | `tests/test_drive_download.py` (offline simulator); `tests/test_h3_mount_repair.py` (mount: 300s-auth cases, timeline); bootstrap resume in `tests/test_fault_injection.py::ControllerFaultTest.test_restart_mid_bootstrap` | `drive_download_probe_ok`, mount timeline JSON |
 | 8 | DRIVE_MOUNTED / DOWNLOAD_READY | Default: token delivered + probe passed. Mount: `h3_controller.check_mount_signature` + `h3_mount_timeline.build_mount_timeline` | Default: probe marker present. Mount: signature line present; timeline shows `drive_auth_success` | Missing probe marker / signature / auth event → fail-closed | — | `tests/test_h3_mount_repair.py::test_mount_fails_after_authorization_despite_exit_zero` (mount) | `MUSE_DRIVE_DOWNLOAD_PROBE_OK` (default), `MUSE_DRIVE_MOUNT_MODELS_VISIBLE` (mount) |
 | 9 | MODELS_RESTORING | `h3_remote_worker.restore_weights` (+ `check_restore_capacity`, `estimate_restore`, `project_restore_throughput`) | All 4 files on NVMe with per-file SHA-256 match; disk + cost gates pass first. Default: downloaded via `h3_drive_download` (Range resume, token renewal via job state). Mount: copied DriveFS → NVMe | Disk short / projected cost over budget → refuse before copying; download failure raises (fail closed) | Copy/download resumable per file; gates enforced pre-copy | `tests/test_drive_download.py` (download simulator); `tests/test_h3_mount_repair.py` (restore capacity/throughput tests) | `WORKER_STAGE: restore_weights` |
 | 10 | MODELS_VERIFIED | Default: the worker's per-file SHA-256 verify inside `h3_drive_download` (no separate probe script). Mount: remote `h3_drive_probe.py` (exec, timeout 180s) | Default: all 4 downloads verified. Mount: stdout contains `MUSE_DRIVE_MOUNT_MODELS_VISIBLE 4` | Default: download error → `WORKER_FAILED_JSON`. Mount: anything else → `Mounted Drive model cache not visible; release GPU` | No retry (fail-closed) | `tests/test_drive_download.py`; `tests/test_h3_production.py` (drive-ready gates) | `CACHE_VERIFIED_NVME` (default), `MUSE_DRIVE_MOUNT_MODELS_VISIBLE 4` (mount) |
@@ -46,6 +46,41 @@ pre-created folder, and the recorded-id reuse all remain
 offline-verified only). See `docs/state-machine-migration-p1a.md` and
 `docs/incidents/24-drive-output-not-server-verified.md`.
 
+## P1-B note (TASK-006, Issue #50)
+
+Restart safety and the duplicate-allocation guard, all offline-verified
+only — no live GPU run has exercised them:
+
+- **Task lock:** `run_variant`, `_resume_run`, `_stop_run` and
+  `_reconcile_task` take the per-task lock (`h3_task_lock.TaskLock`,
+  flock on `model_cache/h3_task_<task>.lock`) before anything else,
+  including the run_id duplicate check. A second controller for the
+  same task raises `TaskLockBusy` without allocating. `status` and
+  `recovery_view` stay lock-free. flock dies with the holder process,
+  so a VM restart leaves no stale lock.
+- **Pre-registration:** the session is recorded as `allocating` and
+  the lease pre-registered (non-final) BEFORE `colab new`; after the
+  call returns, `confirm_session_active` marks it `active`. See stage 5.
+- **Bootstrap state machine:** `_run_bootstrap` records every step in
+  the manifest `bootstrap` field (schema v3) and is shared by
+  `run_variant` and `_resume_bootstrap`. A controller that died
+  mid-bootstrap resumes idempotently from the recorded step and
+  launches the worker only when no launch record exists; a launched
+  but unobservable worker is refused, never double-launched.
+- **Transient vs fatal:** `wait_for_worker` poll failures degrade
+  (one `poll_degraded` audit event + manifest `last_transient_error`)
+  and keep polling until the budget wall time; only the wall time, a
+  worker FAILED stage, or a confirmed stop ends the run. Post-allocation
+  `inspect()` goes through `_inspect_live` (3 attempts); pre-allocation
+  `inspect()` stays strict. UNKNOWN session state blocks any new paid
+  allocation.
+- **Deadline:** `--task-deadline-utc` records `deadline_utc` on the
+  task ledger at authorisation (an existing ledger adopts the first
+  deadline and refuses a different one). Metric F
+  (`h3_reliability.deadline_bound_e2e_success_rate`) scores tasks
+  against it. The live acceptance plan is
+  `docs/runbooks/production-acceptance.md` (proposal only).
+
 ## Pre-stage gates (before any GPU)
 
 `run_variant` refuses to proceed unless ALL of these hold:
@@ -54,7 +89,9 @@ offline-verified only). See `docs/state-machine-migration-p1a.md` and
 `--project-budget-cu 30.0`, `--per-session-budget-cu 25.0`,
 `--gpu-policy G4_THEN_A100_HIGHMEM`, a pinned `--comfy-ref`, and no
 foreign or managed-active sessions (`ensure_no_foreign_sessions`,
-`reconcile_on_startup`). Default download path (TASK-006 P0-B): the
+`reconcile_on_startup`). The per-task lock is taken first (P1-B). A
+`--task-deadline-utc` may be passed to record the task deadline on the
+ledger. Default download path (TASK-006 P0-B): the
 download preflight (read-only token mint + Drive metadata read) runs
 before allocation; no TTY and no `--drive-cache-dir` under
 `/content/drive/` are required. Legacy mount path only:

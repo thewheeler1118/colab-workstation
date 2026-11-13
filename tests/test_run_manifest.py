@@ -240,12 +240,15 @@ class MigrationTest(unittest.TestCase):
     """TASK-006 P1-A (Issue #48): schema v2 + DRIVE_VERIFIED before
     GPU_STOP_CONFIRMED + TASK_COMPLETED requires a STOPPED session."""
 
-    def test_new_manifest_is_schema_v2(self):
+    def test_new_manifest_is_schema_v3(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             m = _create(root)
-            self.assertEqual(m["schema_version"], 2)
-            self.assertEqual(rm.manifest_schema_version(m), 2)
+            # TASK-006 P1-B (Issue #50): new manifests are schema v3.
+            self.assertEqual(m["schema_version"], 3)
+            self.assertEqual(rm.manifest_schema_version(m), 3)
+            self.assertEqual(m["bootstrap"], {"steps": {}, "current_step": None})
+            self.assertIsNone(m["last_transient_error"])
 
     def test_v1_manifest_loads_with_safe_defaults(self):
         with tempfile.TemporaryDirectory() as d:
@@ -345,6 +348,71 @@ class MigrationTest(unittest.TestCase):
             self.assertTrue(applied)
             self.assertEqual(m["artifacts"]["delivery_state"],
                              "REMOTE_UPLOAD_VERIFIED")
+
+    def test_bootstrap_steps_merge_per_step(self):
+        # TASK-006 P1-B (Issue #50): the bootstrap record merges per
+        # step, so a resumed bootstrap keeps the steps it finished.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            _create(root)
+            m, applied, _ = rm.update_run(
+                root, RUN_ID,
+                bootstrap={"current_step": "init_remote",
+                           "steps": {"init_remote": {"state": "done",
+                                                     "at_utc": "2026-11-13T09:00:00Z"}}})
+            self.assertTrue(applied)
+            self.assertEqual(m["bootstrap"]["current_step"], "init_remote")
+            m, applied, _ = rm.update_run(
+                root, RUN_ID,
+                bootstrap={"current_step": "upload_task",
+                           "steps": {"upload_task": {"state": "done",
+                                                     "at_utc": "2026-11-13T09:01:00Z"}}})
+            self.assertTrue(applied)
+            self.assertEqual(
+                m["bootstrap"]["steps"]["init_remote"]["state"], "done")
+            self.assertEqual(
+                m["bootstrap"]["steps"]["upload_task"]["state"], "done")
+            self.assertEqual(m["bootstrap"]["current_step"], "upload_task")
+            view = rm.recovery_view(root, RUN_ID)
+            self.assertEqual(view["bootstrap"]["current_step"], "upload_task")
+
+    def test_transient_error_never_moves_task_state(self):
+        # TASK-006 P1-B: a transient error is recorded with a count;
+        # it never moves task_state and never sets last_error.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            _create(root)
+            m, applied, _ = rm.update_run(
+                root, RUN_ID, transient_error="poll timeout after 90s")
+            self.assertTrue(applied)
+            self.assertEqual(m["task_state"], "TASK_AUTHORIZED")
+            self.assertIsNone(m["last_error"])
+            self.assertEqual(m["last_transient_error"]["count"], 1)
+            self.assertIn("poll timeout", m["last_transient_error"]["error"])
+            m, applied, _ = rm.update_run(
+                root, RUN_ID, transient_error="poll timeout after 90s")
+            self.assertEqual(m["last_transient_error"]["count"], 2)
+            self.assertEqual(m["task_state"], "TASK_AUTHORIZED")
+
+    def test_v2_manifest_loads_with_v3_defaults(self):
+        # A v2 manifest (no bootstrap / last_transient_error keys)
+        # loads with safe defaults and upgrades in place on the next
+        # write without rewriting history.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            m = _create(root)
+            m["schema_version"] = 2
+            del m["bootstrap"]
+            del m["last_transient_error"]
+            (rm.manifest_dir(root) / f"{RUN_ID}.json").write_text(
+                json.dumps(m))
+            view = rm.recovery_view(root, RUN_ID)
+            self.assertEqual(view["bootstrap"],
+                             {"steps": {}, "current_step": None})
+            self.assertIsNone(view["last_transient_error"])
+            m2, applied, _ = rm.update_run(
+                root, RUN_ID, transient_error="x")
+            self.assertEqual(m2["last_transient_error"]["count"], 1)
 
 
 if __name__ == "__main__":

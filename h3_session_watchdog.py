@@ -137,10 +137,17 @@ def save_managed_sessions(sessions: list, path: Path = STATE_PATH) -> None:
 
 
 def record_session(session_id: str, gpu: str, run_id: str, deadline_utc: str, path: Path = STATE_PATH,
-                   production_task_id: str = "") -> dict:
+                   production_task_id: str = "", status: str = "active") -> dict:
     # Under the state lock: re-recording an existing id replaces the old
     # record but carries its version forward (+1), so versions stay
     # monotonic across re-records.
+    # TASK-006 P1-B: `status` is "allocating" when the record is written
+    # BEFORE the CLI `new` call (the session name is known locally, the
+    # live session may not exist yet); confirm_session_active moves it
+    # to "active" after the CLI returns. An "allocating" record is never
+    # treated as stopped and never silently adopted.
+    if status not in ("active", "allocating"):
+        raise ValueError(f"record_session status must be 'active' or 'allocating', got {status!r}")
     with _state_lock(path):
         sessions = load_managed_sessions(path)
         old = next((s for s in sessions if s.get("session_id") == session_id), None)
@@ -152,12 +159,27 @@ def record_session(session_id: str, gpu: str, run_id: str, deadline_utc: str, pa
             "production_task_id": production_task_id,
             "started_at_utc": _utc_now(),
             "deadline_utc": deadline_utc,
-            "status": "active",
+            "status": status,
             "version": (int(old.get("version") or 0) + 1) if old else 1,
             "last_updated_at_utc": _utc_now(),
         }
         sessions.append(rec)
         save_managed_sessions(sessions, path)
+    return rec
+
+
+def confirm_session_active(session_id: str, path: Path = STATE_PATH) -> dict | None:
+    """Move an `allocating` record to `active` after the CLI `new` call
+    returned (TASK-006 P1-B). Returns the record, or None when not found
+    or not in `allocating` state — a record that is already `active` is
+    left alone (confirming twice is a no-op, not an error)."""
+    def _confirm(s: dict) -> bool:
+        if s.get("status") != "allocating":
+            return False
+        s["status"] = "active"
+        return True
+
+    rec, _changed = _mutate_session(session_id, path, _confirm)
     return rec
 
 
@@ -416,7 +438,11 @@ def stop_managed_session(session_id: str, colab_auth: str = "adc",
         return {"session": session_id, "state": "REFUSED_NOT_MANAGED", "stop_cli_ok": None,
                 "attempts": 0, "queries": 0,
                 "error": "session id is not in the managed-session file"}
-    if rec.get("status") != "active":
+    # TASK-006 P1-B: an `allocating` record may be stopped too — that is
+    # an explicit operator decision (the `stop` action), not a silent
+    # ALREADY_STOPPED refusal. A record already `stopped` (or failed)
+    # still refuses: there is nothing live left to stop.
+    if rec.get("status") not in ("active", "allocating"):
         return {"session": session_id, "state": "ALREADY_STOPPED", "stop_cli_ok": None,
                 "attempts": 0, "queries": 0, "error": None}
     return stop_session(session_id, colab_auth=colab_auth)
@@ -454,6 +480,8 @@ def reconcile_on_startup(colab_auth: str = "adc", path: Path = STATE_PATH) -> di
     still = []
     detail = []
     repaired = []
+    failed_allocations = []
+    allocating_live = []
     for s in sessions:
         state = query_session_state(s["session_id"], colab_auth=colab_auth)
         if state is SessionState.UNKNOWN:
@@ -466,6 +494,37 @@ def reconcile_on_startup(colab_auth: str = "adc", path: Path = STATE_PATH) -> di
                     f"managed record for {s['session_id']} (run {s.get('run_id')}) says stopped "
                     "but the session is still ACTIVE; failing closed: refusing to allocate a "
                     "new GPU — stop that session explicitly first")
+            continue
+        # TASK-006 P1-B: an `allocating` record is a session whose CLI
+        # `new` call may or may not have completed (the controller died
+        # in the allocation window). Resolve it by live query, never by
+        # assumption: live STOPPED means the allocation never happened
+        # (mark it failed, it no longer blocks); live ACTIVE means a
+        # billing GPU exists that no run owns yet (it blocks a new
+        # allocation and is reported separately so the operator can
+        # stop it explicitly or resume the run).
+        if s.get("status") == "allocating":
+            if state is SessionState.STOPPED:
+                def _fail(rec):
+                    if rec.get("status") != "allocating":
+                        return False
+                    rec["status"] = "allocation_failed"
+                    return True
+
+                _mutate_session(s["session_id"], path, _fail)
+                failed_allocations.append(s["session_id"])
+                continue
+            allocating_live.append(s["session_id"])
+            still.append(s["session_id"])
+            detail.append({
+                "session_id": s["session_id"],
+                "run_id": s.get("run_id"),
+                "production_task_id": s.get("production_task_id"),
+                "deadline_utc": s.get("deadline_utc"),
+                "started_at_utc": s.get("started_at_utc"),
+                "unbilled_estimate_cu": None,
+                "allocating": True,
+            })
             continue
         if state is SessionState.STOPPED:
             mark_session_stopped(s["session_id"], SessionState.STOPPED, path=path)
@@ -490,6 +549,8 @@ def reconcile_on_startup(colab_auth: str = "adc", path: Path = STATE_PATH) -> di
         })
     return {"managed_active_sessions": still, "managed_active_detail": detail,
             "repaired_stale_active": repaired,
+            "failed_allocations": failed_allocations,
+            "allocating_live_sessions": allocating_live,
             "checked_at_utc": _utc_now()}
 
 
