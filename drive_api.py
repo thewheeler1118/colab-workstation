@@ -53,8 +53,12 @@ def resumable_upload(service, source:Path, parent_id:str, mime_type='application
 def build_drive_service_from_adc():
     """ADC must be authorized separately by the user with appropriate Drive scopes.
     Caller MUST compare the effective Drive account with Colab OAuth account before use.
+
+    Transport (TASK-005 PR-7): requests via h3_drive_transport. The previous
+    build(credentials=...) form routed through httplib2, which fails on this
+    VM with SSL WRONG_VERSION_NUMBER (see drive_depot.drive_service).
     """
     import google.auth
-    from googleapiclient.discovery import build
+    from h3_drive_transport import build_requests_drive_service
     creds,_=google.auth.default(scopes=['https://www.googleapis.com/auth/drive.file'])
-    return build('drive','v3',credentials=creds,cache_discovery=False)
+    return build_requests_drive_service(creds)

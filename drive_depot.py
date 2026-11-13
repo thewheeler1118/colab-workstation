@@ -77,23 +77,19 @@ def _is_transient_drive_error(exc: BaseException) -> bool:
 def drive_service():
     # Google Cloud ADC created by USER, not Colab CLI's private OAuth keyring.
     # User chose broad Drive scope; never hand the long-lived ADC file to Colab.
-    # Muse VM transport adaptation (2026-11-10, same class as stage-0 Linux
-    # notes): the VM egresses via an authenticated TLS-intercepting proxy.
-    # Stock httplib2 ignores the proxy without PySocks (isgood() is falsy)
-    # and validates against its bundled CA file instead of SSL_CERT_FILE,
-    # so Drive calls fail with WRONG_VERSION_NUMBER / CERTIFICATE_VERIFY_FAILED.
-    # Build the transport explicitly from the environment; no request, scope
-    # or verification logic is changed by this.
+    # Transport (TASK-005 PR-7, Issue #30): requests via h3_drive_transport.
+    # The stock httplib2 transport failed on this VM with
+    # SSL WRONG_VERSION_NUMBER on every Drive API call (measured §6/§7:
+    # same ADC, same scopes — requests files.get OK, httplib2 fails), and
+    # build(credentials=...) does NOT escape httplib2 (google-api-python-
+    # client 2.202.0 routes credentials through AuthorizedHttp). The
+    # requests adapter is the only transport that works here. No request,
+    # scope or verification logic is changed by this.
     import google.auth
-    from google_auth_httplib2 import AuthorizedHttp
-    from googleapiclient.discovery import build
-    import httplib2
+    from h3_drive_transport import build_requests_drive_service
+
     creds,_=google.auth.default(scopes=[DRIVE_SCOPE,'https://www.googleapis.com/auth/userinfo.email'])
-    if getattr(creds,'service_account_email',None):
-        raise RuntimeError('Service-account credentials do not guarantee same personal Drive owner; use user ADC')
-    http=httplib2.Http(proxy_info=httplib2.proxy_info_from_environment('https'),
-                      ca_certs=os.environ.get('SSL_CERT_FILE'))
-    return build('drive','v3',http=AuthorizedHttp(creds,http=http),cache_discovery=False)
+    return build_requests_drive_service(creds)
 
 
 def account_matches(service, colab_auth:str)->bool:

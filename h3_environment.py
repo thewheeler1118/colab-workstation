@@ -163,10 +163,7 @@ def generate_environment_manifest(cli_exe: str | None = None,
         "ffmpeg_version": None,
         "ffprobe_present": False,
         "ffprobe_version": None,
-        "drive_transport": {"transport": "httplib2",
-                            "status": "KNOWN_BROKEN_ON_THIS_VM",
-                            "fix": "PR-7 (Issue #30): switch drive_service() "
-                                   "to a requests-based transport"},
+        "drive_transport": _drive_transport_record(),
         "comfyui_commit": None,
         "model_hf_revision": None,
         "workflow_sha256": None,
@@ -217,6 +214,26 @@ def generate_environment_manifest(cli_exe: str | None = None,
     return manifest
 
 
+def _drive_transport_record() -> dict:
+    """The Drive transport the code actually uses, read from the module
+    that implements it — never a hardcoded string. PR-7 replaced the
+    httplib2 transport (KNOWN_BROKEN_ON_THIS_VM) with requests; the gate
+    enforces the recorded transport value, so a silent revert to
+    httplib2 fails closed instead of failing at the first Drive call."""
+    try:
+        from h3_drive_transport import DRIVE_TRANSPORT
+
+        transport = DRIVE_TRANSPORT
+    except Exception:
+        transport = None
+    return {"transport": transport,
+            "status": ("requests (httplib2 replaced in PR-7, Issue #30; "
+                       "live read-only verification 2026-11-13)")
+            if transport == "requests" else "UNKNOWN — transport module missing",
+            "fix": ("PR-7 (Issue #30): drive_service() now builds on "
+                    "h3_drive_transport.RequestsHttp")}
+
+
 def _live_environment(cli_exe: str | None = None, search_roots=None) -> dict:
     """The same fields generate_environment_manifest records, re-read
     live for the gate. Reuses the generator so the two can never drift
@@ -232,7 +249,9 @@ def verify_environment(manifest: dict | None = None,
     Raises EnvironmentMismatch on the FIRST gated mismatch (field,
     expected, actual all named). Returns a report dict on success.
     Python is gated by membership in the manifest's allowed list; the
-    Drive transport is recorded evidence, never a gate."""
+    Drive transport is gated on its recorded value (PR-7 made it a real
+    gate — the value is read from the transport module itself, so a
+    revert fails closed here instead of at the first Drive call)."""
     if manifest is None:
         path = Path(manifest_path) if manifest_path else ENVIRONMENT_MANIFEST_PATH
         if not path.is_file():
@@ -266,5 +285,19 @@ def verify_environment(manifest: dict | None = None,
             f"controller on an allowed Python, or widen the list "
             f"deliberately in a PR.")
     report["cli_executable"] = live.get("cli_executable")
+    expected_transport = (manifest.get("drive_transport") or {}).get("transport")
+    live_transport = (live.get("drive_transport") or {}).get("transport")
+    entry = {"field": "drive_transport.transport",
+             "expected": expected_transport, "actual": live_transport,
+             "match": expected_transport == live_transport
+             and expected_transport is not None}
+    report["checked"].append(entry)
+    if not entry["match"]:
+        raise EnvironmentMismatch(
+            f"Environment mismatch on drive_transport.transport: expected "
+            f"{expected_transport!r}, got {live_transport!r}. The Drive "
+            f"transport is pinned to requests (PR-7); a revert to httplib2 "
+            f"fails on this VM. Regenerate the manifest deliberately in a "
+            f"PR if the transport changes.")
     report["drive_transport"] = manifest.get("drive_transport")
     return report

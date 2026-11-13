@@ -19,9 +19,9 @@
   "ffprobe_present": true,
   "ffprobe_version": "ffprobe version 8.1.2 Copyright (c) 2007-2026 the FFmpeg developers",
   "drive_transport": {
-    "transport": "httplib2",
-    "status": "KNOWN_BROKEN_ON_THIS_VM",
-    "fix": "PR-7 (Issue #30): switch drive_service() to a requests-based transport"
+    "transport": "requests",
+    "status": "requests (httplib2 replaced in PR-7, Issue #30; live read-only verification 2026-11-13)",
+    "fix": "PR-7 (Issue #30): drive_service() now builds on h3_drive_transport.RequestsHttp"
   },
   "comfyui_commit": "61e524bdba7a4e193b45c2697f1af83c1beb86d6",
   "model_hf_revision": "54472221d27c695fca9621b0c3ed52f06c4af707",
