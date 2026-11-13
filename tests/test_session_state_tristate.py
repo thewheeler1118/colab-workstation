@@ -133,6 +133,74 @@ class ReconcileUnknownTest(unittest.TestCase):
             self.assertEqual(out["managed_active_sessions"], [])
 
 
+class AllocatingRecordTest(unittest.TestCase):
+    """TASK-006 P1-B (Issue #50): pre-registration of a session before
+    the CLI `new` call, resolved by live query in reconcile."""
+
+    def _state_file(self, d, status="allocating"):
+        state = Path(d) / "sessions.json"
+        record_session(SID, "G4", "run-1", "2026-11-12T13:00:00+00:00",
+                       path=state, production_task_id="h3-ab-20261112",
+                       status=status)
+        return state
+
+    def test_record_allocating_then_confirm(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = self._state_file(d)
+            stored = load_managed_sessions(path=state)
+            self.assertEqual(stored[0]["status"], "allocating")
+            rec = wd.confirm_session_active(SID, path=state)
+            self.assertEqual(rec["status"], "active")
+            # Confirming twice is a no-op, not an error.
+            rec2 = wd.confirm_session_active(SID, path=state)
+            self.assertEqual(rec2["status"], "active")
+
+    def test_record_rejects_bad_status(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = Path(d) / "sessions.json"
+            with self.assertRaises(ValueError):
+                record_session(SID, "G4", "run-1", "2026-11-12T13:00:00+00:00",
+                               path=state, status="bogus")
+
+    def test_allocating_live_blocks_and_is_reported(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = self._state_file(d)
+            with mock.patch.object(wd, "query_session_state",
+                                  return_value=SessionState.ACTIVE):
+                out = reconcile_on_startup("adc", path=state)
+            self.assertEqual(out["managed_active_sessions"], [SID])
+            self.assertEqual(out["allocating_live_sessions"], [SID])
+            self.assertTrue(out["managed_active_detail"][0]["allocating"])
+
+    def test_allocating_stopped_is_marked_failed_and_unblocks(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = self._state_file(d)
+            with mock.patch.object(wd, "query_session_state",
+                                  return_value=SessionState.STOPPED):
+                out = reconcile_on_startup("adc", path=state)
+            self.assertEqual(out["managed_active_sessions"], [])
+            self.assertEqual(out["failed_allocations"], [SID])
+            stored = load_managed_sessions(path=state)
+            self.assertEqual(stored[0]["status"], "allocation_failed")
+
+    def test_allocating_unknown_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = self._state_file(d)
+            with mock.patch.object(wd, "query_session_state",
+                                  return_value=SessionState.UNKNOWN):
+                with self.assertRaises(SessionQueryError):
+                    reconcile_on_startup("adc", path=state)
+
+    def test_stop_managed_session_accepts_allocating(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = self._state_file(d)
+            with mock.patch.object(wd, "stop_session",
+                                  return_value={"state": "STOPPED"}) as stopped:
+                out = wd.stop_managed_session(SID, path=state)
+            stopped.assert_called_once()
+            self.assertEqual(out["state"], "STOPPED")
+
+
 class WatchUnknownTest(unittest.TestCase):
     def _setup(self, d, deadline):
         state = Path(d) / "sessions.json"

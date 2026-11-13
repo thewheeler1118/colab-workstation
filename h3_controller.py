@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import functools
 import json
 import os
 import shutil
@@ -42,6 +43,7 @@ from h3_budget import (
     is_transient_transport_error,
     load_or_create_budget_ledger,
     parse_gpu_probe_output,
+    parse_task_deadline,
     parse_usage_text,
     read_live_usage,
     reconcile_budget,
@@ -511,13 +513,15 @@ def ensure_no_foreign_sessions(pre):
 
 
 def initialize_project_budget(run_id: str, prior_unbilled_reserve_cu: float = PRIOR_TASK_UNBILLED_RESERVE_CU,
-                              authorize_new_task: bool = False) -> dict:
+                              authorize_new_task: bool = False,
+                              deadline_utc: str | None = None) -> dict:
     live = read_live_usage(_COLAB_AUTH)
     if live.get("balance") is None:
         raise RuntimeError("Cannot parse CU balance; abort")
     return load_or_create_budget_ledger(LEDGER_PATH, live["balance"], run_id,
                                         prior_unbilled_reserve_cu=prior_unbilled_reserve_cu,
-                                        authorize_new_task=authorize_new_task)
+                                        authorize_new_task=authorize_new_task,
+                                        deadline_utc=deadline_utc)
 
 
 def probe_actual_gpu(session: str, choice_key: str) -> dict:
@@ -1455,18 +1459,44 @@ def check_job_done_info(done_info, variant: str) -> dict:
     return done_info
 
 
+def _inspect_live(run_id: str | None = None, retries: int = 3) -> dict:
+    """inspect() with bounded retries for transient CLI failures
+    (TASK-006 P1-B). A transient failure is recorded on the manifest
+    (never a task failure by itself); only a failure on every attempt
+    raises. Pre-allocation callers do NOT use this: before any GPU
+    exists, an unverifiable balance still refuses outright."""
+    last = None
+    for attempt in range(retries):
+        try:
+            return inspect()
+        except Exception as e:  # noqa: BLE001 - retried, then raised
+            last = e
+            if run_id is not None:
+                _manifest_update(
+                    run_id,
+                    transient_error=f"inspect() transient failure "
+                                    f"(attempt {attempt + 1}/{retries}): {e}"[:500])
+            if attempt < retries - 1:
+                time.sleep(2)
+    raise last
+
+
 def wait_for_worker(session: str, run_id: str, variant: str,
                     deadline_monotonic: float, poll_interval_sec: int = 60,
-                    max_consecutive_poll_failures: int = 3,
+                    degraded_after_failures: int = 3,
                     on_state=None) -> dict:
     """Poll the detached worker until VIDEO_READY. Returns the final
     worker state. Raises on worker FAILED, on the budget wall time, on
-    too many consecutive poll failures, on an unknown stage, or on a
-    state record that belongs to another run. A failed poll never means
-    'the worker is dead': the loop retries, and only the bounded failure
-    count turns unobservability into a run failure (the GPU is then
-    stopped by the caller's finally block, exactly as before)."""
+    an unknown stage, or on a state record that belongs to another run.
+    A failed poll never means 'the worker is dead' (TASK-006 P1-B):
+    after `degraded_after_failures` consecutive poll failures the run
+    is marked degraded (audit event + manifest transient error) and
+    polling CONTINUES until the budget wall time — a network timeout
+    is not a task failure. The watchdog still enforces the deadline
+    on its own poll loop while the channel is down, so the extended
+    retry cannot burn past the deadline."""
     failures = 0
+    degraded = False
     while True:
         if time.monotonic() > deadline_monotonic:
             raise TimeoutError(
@@ -1475,13 +1505,20 @@ def wait_for_worker(session: str, run_id: str, variant: str,
             state = poll_worker(session)
         except WorkerPollError as e:
             failures += 1
-            if failures >= max_consecutive_poll_failures:
-                raise RuntimeError(
-                    f"Worker state unobservable after {failures} consecutive poll "
-                    f"failures: {e}") from e
+            if failures >= degraded_after_failures and not degraded:
+                degraded = True
+                record({"event": "poll_degraded", "session": session,
+                        "run_id": run_id,
+                        "consecutive_failures": failures,
+                        "error": str(e)[:300]})
+                _manifest_update(
+                    run_id,
+                    transient_error=f"worker poll degraded after {failures} "
+                                    f"consecutive failures: {e}"[:500])
             time.sleep(poll_interval_sec)
             continue
         failures = 0
+        degraded = False
         if state.get("run_id") != run_id or state.get("variant") != variant:
             raise RuntimeError(
                 f"Worker state belongs to another run: {state.get('run_id')!r}/"
@@ -1659,7 +1696,7 @@ def _resume_finish(args, manifest: dict, worker_state: dict) -> dict:
     # The tail below re-verifies the recorded id server-side before
     # marking DRIVE_VERIFIED.
     _record_remote_upload(run_id, worker_state)
-    live = inspect()
+    live = _inspect_live(run_id)
     production_result = {
         "variant": variant, "run_id": run_id, "session": session_id,
         "video": info, "live_balance_cu": live["cu_balance"],
@@ -1693,6 +1730,107 @@ def _resume_finish(args, manifest: dict, worker_state: dict) -> dict:
     return production_result
 
 
+def _with_task_lock(fn):
+    """Serialise one controller per production task (TASK-006 P1-B,
+    Issue #50). The task id comes from args.production_task_id
+    (run / reconcile) or from the run's manifest (resume / stop). When
+    no task id can be resolved, the function runs unlocked — its own
+    validation raises. A second controller for the same task refuses
+    immediately (TaskLockBusy) without allocating anything."""
+    @functools.wraps(fn)
+    def wrapper(args, *a, **kw):
+        task_id = getattr(args, "production_task_id", "") or ""
+        if not task_id and fn.__name__ in ("_resume_run", "_stop_run"):
+            try:
+                from h3_run_manifest import load_run_manifest
+
+                manifest = load_run_manifest(ROOT, getattr(args, "run_id", ""))
+                task_id = (manifest or {}).get("production_task_id") or ""
+            except Exception:
+                task_id = ""
+        if not task_id:
+            return fn(args, *a, **kw)
+        from h3_task_lock import TaskLock
+
+        with TaskLock(ROOT, task_id):
+            return fn(args, *a, **kw)
+
+    return wrapper
+
+
+def _worker_launched(manifest: dict) -> bool:
+    """True when the remote worker was (almost certainly) already
+    launched for this run. The bootstrap step record is the primary
+    signal; the task state is the fallback for manifests written before
+    P1-B (no ``bootstrap`` field) — a run at or past WORKER_STARTED was
+    launched, because the old controller recorded WORKER_STARTED only
+    after the task was built and immediately before launching. The
+    sub-second window between that record and the launch is resolved
+    fail-closed (refuse, never double-launch)."""
+    steps = ((manifest.get("bootstrap") or {}).get("steps") or {})
+    if (steps.get("launch_worker") or {}).get("state") == "done":
+        return True
+    try:
+        from h3_run_manifest import TASK_STAGES
+        return (TASK_STAGES.index(manifest.get("task_state", "")) >=
+                TASK_STAGES.index("WORKER_STARTED"))
+    except ValueError:
+        return False
+
+
+def _resume_bootstrap(args, manifest: dict) -> dict:
+    """Resume a run whose controller died mid-bootstrap (TASK-006 P1-B).
+
+    Only entered when the worker was never launched (no `launch_worker`
+    step in the manifest). Re-runs the bootstrap idempotently from the
+    recorded step, launches the worker, and finishes the run the same
+    way as run_variant. Never allocates a GPU, never re-runs inference
+    (none ever ran). The remaining budget is recomputed from the live
+    rate + ledger, with the same 300 s floor as the poll-loop resume."""
+    run_id = manifest["run_id"]
+    variant = manifest["variant"]
+    session_id = manifest["session_id"]
+    task_id = manifest["production_task_id"]
+    ledger_path = ledger_path_for_task(ROOT, task_id)
+    if not ledger_path.is_file():
+        return {"resumed": False, "run_id": run_id,
+                "reason": f"no budget ledger for task {task_id}; resume never "
+                          f"creates a 30 CU ledger"}
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    live = _inspect_live(run_id)
+    if live["rate"] is None or live["rate"] <= 0:
+        return {"resumed": False, "run_id": run_id,
+                "reason": "live CU/hr rate unreadable; cannot bound a resumed bootstrap"}
+    budget_sec = allowed_runtime_seconds(live["rate"], live["cu_balance"], ledger)
+    budget_sec = min(budget_sec, getattr(args, "max_wall_sec", MAX_SESSION_SECONDS))
+    if budget_sec < 300:
+        return {"resumed": False, "run_id": run_id,
+                "reason": "remaining budget cannot cover a minimal resumed run + cleanup reserve"}
+    run_dir = RUNS / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    start = time.monotonic()
+    boot = _run_bootstrap(args, session_id, run_dir, budget_sec, live["rate"], start)
+    launch = launch_worker(session_id)
+    record({"event": "worker_launched", "variant": variant, "session": session_id, "launch": launch})
+    _manifest_update(run_id, bootstrap={
+        "steps": {"launch_worker": {"state": "done", "at_utc": _utc_now_iso()}}})
+    try:
+        worker_state = wait_for_worker(
+            session_id, run_id, variant,
+            deadline_monotonic=start + budget_sec,
+            poll_interval_sec=getattr(args, "poll_interval_sec", 60),
+            on_state=_make_worker_state_handler(
+                run_id, session_id, run_dir, boot["renewal_state"]))
+        done_info = check_job_done_info(worker_state.get("output"), variant)
+    except Exception:
+        # Pull the server log before the session stops: it holds the
+        # /prompt rejection detail the worker output may lack.
+        download_remote_comfyui_log(session_id, run_dir)
+        raise
+    return _resume_finish(args, manifest, worker_state)
+
+
+@_with_task_lock
 def _resume_run(args) -> dict:
     """Reconcile a run from its durable manifest and resume it if it is
     safe to do so. The checklist (TASK-005 §4.3), in order:
@@ -1776,11 +1914,17 @@ def _resume_run(args) -> dict:
     try:
         worker_state = poll_worker(session_id)
     except WorkerPollError as e:
-        return {"resumed": False, "run_id": run_id,
-                "reason": f"worker state unobservable ({e}); session left "
-                          f"running — stop it explicitly with the stop action "
-                          f"if it should not continue",
-                "view": view}
+        # TASK-006 P1-B: the worker may never have launched — the
+        # controller died mid-bootstrap. The manifest decides: no launch
+        # signal means resume the bootstrap; a launch signal with no
+        # observable state means refuse (never double-launch a worker).
+        if _worker_launched(manifest):
+            return {"resumed": False, "run_id": run_id,
+                    "reason": f"worker launched but state unobservable ({e}); session left "
+                              f"running — stop it explicitly with the stop action "
+                              f"if it should not continue",
+                    "view": view}
+        return _resume_bootstrap(args, manifest)
     if worker_state.get("run_id") != run_id \
             or worker_state.get("variant") != manifest.get("variant"):
         return {"resumed": False, "run_id": run_id,
@@ -1803,7 +1947,7 @@ def _resume_run(args) -> dict:
         return _resume_finish(args, manifest, worker_state)
     # Still running: re-enter the poll loop under the remaining budget,
     # then finish the run the same way.
-    live = inspect()
+    live = _inspect_live(run_id)
     if live["rate"] is None or live["rate"] <= 0:
         return {"resumed": False, "run_id": run_id,
                 "reason": "live CU/hr rate unreadable; cannot bound a resumed poll loop",
@@ -1824,6 +1968,7 @@ def _resume_run(args) -> dict:
     return _resume_finish(args, manifest, worker_state)
 
 
+@_with_task_lock
 def _stop_run(args) -> dict:
     """Stop a run's managed session via the structured stop contract
     (PR-2). Refuses when the manifest has no session, or the session is
@@ -1847,6 +1992,7 @@ def _stop_run(args) -> dict:
     return result
 
 
+@_with_task_lock
 def _reconcile_task(args) -> dict:
     """Reconcile every manifest of one production task against the real
     session state. Corrects a manifest's session_state only from a
@@ -1886,6 +2032,210 @@ def _reconcile_task(args) -> dict:
     return report
 
 
+def _utc_now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _bootstrap_state(run_id: str) -> dict:
+    """The durable bootstrap record for a run (empty when absent).
+    Best-effort: a missing/unreadable manifest means 'nothing done'."""
+    try:
+        from h3_run_manifest import load_run_manifest
+
+        manifest = load_run_manifest(ROOT, run_id)
+        return (manifest or {}).get("bootstrap") or {"steps": {}, "current_step": None}
+    except Exception:
+        return {"steps": {}, "current_step": None}
+
+
+def _run_bootstrap(args, session: str, run_dir: Path, budget_sec: int,
+                   live_rate: float, start: float) -> dict:
+    """Run (or re-run, idempotently) the bootstrap sequence between
+    GPU_ALLOCATED and WORKER_STARTED (TASK-006 P1-B, Issue #50).
+
+    Steps are recorded in the manifest's `bootstrap` field before they
+    are attempted (`current_step`) and after they succeed (`done`). A
+    controller restart mid-bootstrap leaves an exact pointer at the
+    interrupted step; a resume re-runs from there, skipping steps
+    already `done` (uploads overwrite the same remote paths, so
+    re-running a step is idempotent). The drive download probe and the
+    mount probe always re-run: they are cheap and re-prove the remote
+    still holds the token files / the mount. The task upload always
+    re-runs too: budget_sec / rate are fresh on a resume.
+
+    Returns {"drive_download", "drive_upload", "task", "renewal_state"}.
+    Raises on any hard failure (the caller's finally stops the GPU).
+    The drive_upload_block step is fail-soft: it records `skipped` and
+    the run falls back to controller-side delivery.
+    """
+    run_id = args.run_id
+    variant = args.variant
+    drive_source = getattr(args, "drive_source", "download")
+    bootstrap = _bootstrap_state(run_id)
+    done_steps = dict(bootstrap.get("steps") or {})
+
+    def _is_done(step: str) -> bool:
+        return (done_steps.get(step) or {}).get("state") == "done"
+
+    def _begin(step: str) -> None:
+        _manifest_update(run_id, bootstrap={"current_step": step})
+
+    def _finish(step: str, state: str = "done") -> None:
+        _manifest_update(run_id, bootstrap={
+            "current_step": None,
+            "steps": {step: {"state": state, "at_utc": _utc_now_iso()}}})
+        done_steps[step] = {"state": state}
+
+    drive_download = None
+    drive_upload = None
+    renewal_state = {"count": 0, "last_token_id": None}
+    if drive_source == "mount":
+        if not _is_done("mount_drive"):
+            _begin("mount_drive")
+            # Remote signature probe: verify drive.mount accepts timeout_ms
+            # before spending the mount window on a patched call the remote
+            # runtime would reject with TypeError.
+            sig = exec_script(session, ROOT / "h3_mount_signature_probe.py", timeout=120)
+            if not check_mount_signature(sig):
+                raise RuntimeError("Remote drive.mount does not accept timeout_ms; abort before drivemount")
+            # Official interactive Drive mount (patched remote timeout 600s).
+            mount_drive(session, deadline_sec=budget_sec, run_id=run_id,
+                        timeline_path=run_dir / "mount_timeline.json")
+            _finish("mount_drive")
+    if not _is_done("init_remote"):
+        _begin("init_remote")
+        exec_script(session, ROOT / "h3_init_remote.py", timeout=60)
+        _finish("init_remote")
+    if not _is_done("upload_contract_files"):
+        _begin("upload_contract_files")
+        # Upload poster, contract, assemble, manifest, workflow, submitted workflow.
+        api = validate_comfy_workflow(args.workflow_api, variant)
+        submitted_path = run_dir / f"workflow_{variant}_submitted.json"
+        submitted_path.write_text(json.dumps(api, ensure_ascii=False, indent=2))
+        for source, target in [
+            (ROOT / "assets" / "original_poster.jpg", REMOTE + "/poster.jpg"),
+            (ROOT / "h3_contract.py", REMOTE + "/h3_contract.py"),
+            (ROOT / "assemble.py", REMOTE + "/assemble.py"),
+            (Path(args.cache_manifest), REMOTE + "/model_manifest.json"),
+            (Path(args.workflow_api), REMOTE + "/workflow_api.json"),
+            (submitted_path, REMOTE + "/workflow_submitted.json"),
+        ]:
+            run_cli(["upload", "-s", session, str(source), target], timeout=300)
+        _finish("upload_contract_files")
+    if drive_source == "mount":
+        # The mount probe always re-runs: cheap, and it re-proves the
+        # mount is still live. mount_drive itself is skipped when done
+        # (it needs a TTY and must never be re-entered blindly).
+        _begin("mount_probe")
+        mount_cfg = RUNS / f"mount_{session}.json"
+        mount_cfg.write_text(json.dumps({"drive_cache_dir": args.drive_cache_dir}))
+        run_cli(["upload", "-s", session, str(mount_cfg), REMOTE + "/drive_mount_config.json"], timeout=120)
+        mount_probe = exec_script(session, ROOT / "h3_drive_probe.py", timeout=180)
+        persist_exec_result(run_dir, f"drive_probe_{variant}", mount_probe)
+        if "MUSE_DRIVE_MOUNT_MODELS_VISIBLE 4" not in mount_probe["stdout"]:
+            raise RuntimeError("Mounted Drive model cache not visible; release GPU")
+        _finish("mount_probe")
+    else:
+        # The download probe always re-runs: fresh tokens are minted
+        # each time, and the probe re-proves the remote transport with
+        # a 1 MiB Range probe before the worker starts. The worker
+        # token file is deleted by the worker on first read.
+        _begin("drive_download_probe")
+        drive_download = _build_drive_download_block(args.cache_manifest)
+        _mint_and_upload_drive_token(session, run_dir, "drive_token.json")
+        _mint_and_upload_drive_token(session, run_dir, "drive_token_probe.json")
+        probe_spec_path = run_dir / "drive_download_probe.json"
+        probe_spec_path.write_text(json.dumps(drive_download["probe"]))
+        run_cli(["upload", "-s", session, str(probe_spec_path),
+                 REMOTE + "/drive_download_probe.json"], timeout=120)
+        run_cli(["upload", "-s", session, str(ROOT / "h3_drive_download.py"),
+                 REMOTE + "/h3_drive_download.py"], timeout=120)
+        run_cli(["upload", "-s", session, str(ROOT / "h3_drive_download_probe.py"),
+                 REMOTE + "/h3_drive_download_probe.py"], timeout=120)
+        download_probe = exec_script(session, ROOT / "h3_drive_download_probe.py", timeout=180)
+        persist_exec_result(run_dir, f"drive_download_probe_{variant}", download_probe)
+        if "MUSE_DRIVE_DOWNLOAD_PROBE_OK" not in download_probe["stdout"]:
+            raise RuntimeError("Remote Drive download probe failed; release GPU")
+        record({"event": "drive_download_probe_ok", "session": session,
+                "run_id": run_id,
+                "probe_file_id": drive_download["probe"]["file_id"]})
+        _finish("drive_download_probe")
+        if not _is_done("drive_upload_block"):
+            _begin("drive_upload_block")
+            # TASK-006 P1-A: worker-side durable upload. Pre-create
+            # the run folder, mint the least-privilege drive.file
+            # token, and upload the stdlib uploader module. Any
+            # failure here is fail-soft: the worker simply gets no
+            # drive_upload block and the run falls back to the
+            # controller-side download + idempotent delivery.
+            try:
+                drive_upload = _build_drive_upload_block(run_id, variant)
+                import h3_drive_token
+
+                _mint_and_upload_drive_token(
+                    session, run_dir, "drive_upload_token.json",
+                    mint_fn=h3_drive_token.mint_file_token)
+                run_cli(["upload", "-s", session, str(ROOT / "h3_drive_upload.py"),
+                         REMOTE + "/h3_drive_upload.py"], timeout=120)
+                record({"event": "drive_upload_block_ready", "session": session,
+                        "run_id": run_id,
+                        "folder_id": drive_upload["folder_id"]})
+                _finish("drive_upload_block")
+            except Exception as e:  # noqa: BLE001 - fail-soft to controller delivery
+                drive_upload = None
+                record({"event": "drive_upload_block_failed", "session": session,
+                        "run_id": run_id, "error_type": type(e).__name__,
+                        "error": str(e)[:300]})
+                _finish("drive_upload_block", state="skipped")
+    if not _is_done("upload_worker_files"):
+        _begin("upload_worker_files")
+        # Worker files go up only after the cache probe passed:
+        # the probe must run before the remote worker that does H3
+        # inference (and the test in test_auth_and_transport enforces
+        # this order). The launcher needs both files on the remote disk.
+        worker_uploads = [
+            (ROOT / "h3_job_state.py", REMOTE + "/h3_job_state.py"),
+            (ROOT / "h3_remote_worker.py", REMOTE + "/h3_remote_worker.py"),
+        ]
+        if drive_source == "download":
+            worker_uploads.append(
+                (ROOT / "h3_drive_download.py", REMOTE + "/h3_drive_download.py"))
+        for source, target in worker_uploads:
+            run_cli(["upload", "-s", session, str(source), target], timeout=300)
+        _finish("upload_worker_files")
+    # Single-variant remote worker. The task is always rebuilt: the
+    # budget wall time and rate are fresh on a resume.
+    _begin("upload_task")
+    elapsed = time.monotonic() - start
+    if elapsed > budget_sec:
+        raise TimeoutError("Budget wall time reached before " + variant)
+    task = {"variant": variant, "run_id": run_id, "drive_cache_dir": args.drive_cache_dir, "comfy_ref": args.comfy_ref,
+            "inference_timeout_sec": min(1800, max(100, int(budget_sec - elapsed - 120))),
+            "rate_cu_h": live_rate,
+            "session_budget_cu": round(budget_sec * float(live_rate) / 3600.0, 3),
+            "comfyui_cache": _comfyui_cache_task(),
+            "drive_source": drive_source}
+    if drive_source == "download":
+        # The worker downloads from Drive with the delivered
+        # short-lived token; drive_cache_dir is kept as the
+        # download staging dir for the worker's path handling.
+        task["drive_cache_dir"] = drive_download["dest_dir"]
+        task["drive_download"] = drive_download
+        # TASK-006 P1-A: the worker uploads the finished MP4
+        # itself when this block is present; absent, the run
+        # falls back to controller-side delivery.
+        if drive_upload is not None:
+            task["drive_upload"] = drive_upload
+    task_path = RUNS / f"task_{session}.json"
+    task_path.write_text(json.dumps(task))
+    run_cli(["upload", "-s", session, str(task_path), REMOTE + "/task.json"], timeout=120)
+    _finish("upload_task")
+    _manifest_update(run_id, task_state="WORKER_STARTED", heartbeat=True)
+    return {"drive_download": drive_download, "drive_upload": drive_upload,
+            "task": task, "renewal_state": renewal_state}
+
+
+@_with_task_lock
 def run_variant(args) -> dict:
     global _EXEC_LOG_DIR, LEDGER_PATH, PRODUCTION_TASK_ID
     variant = args.variant
@@ -1955,7 +2305,9 @@ def run_variant(args) -> dict:
     ledger = initialize_project_budget(args.run_id,
                                        prior_unbilled_reserve_cu=getattr(args, "prior_unbilled_reserve_cu",
                                                                          PRIOR_TASK_UNBILLED_RESERVE_CU),
-                                       authorize_new_task=getattr(args, "authorize_new_task", False))
+                                       authorize_new_task=getattr(args, "authorize_new_task", False),
+                                       deadline_utc=parse_task_deadline(
+                                           getattr(args, "task_deadline_utc", "")))
     # Durable run manifest (TASK-005 §4.1): the task is authorised here,
     # so the persistent record starts now and survives a controller restart.
     _manifest_create(args, ledger)
@@ -1982,10 +2334,15 @@ def run_variant(args) -> dict:
         lines = []
         for d in detail:
             est = d.get("unbilled_estimate_cu")
+            # TASK-006 P1-B: name an allocating record explicitly — its
+            # controller died mid-allocation, so the operator stops it
+            # or resumes its run; it is never silently adopted.
+            allocating = " [ALLOCATING — controller died mid-allocation]" \
+                if d.get("allocating") else ""
             lines.append(
                 f"{d.get('session_id')} (run {d.get('run_id')}, task {d.get('production_task_id')}, "
                 f"deadline {d.get('deadline_utc')}, unbilled estimate "
-                f"{est if est is not None else 'unconfirmable'} CU)")
+                f"{est if est is not None else 'unconfirmable'} CU){allocating}")
         raise RuntimeError(
             "CRITICAL_ORPHAN_GPU_SESSION: managed GPU session(s) still active; refusing to allocate "
             "another GPU in parallel. Stop them first (never stop non-project sessions): "
@@ -2031,12 +2388,36 @@ def run_variant(args) -> dict:
         # Empty POSTs carry data=b'{}' via the vendored CLI patch (see
         # cli_post_body_patch_present / V3_CLI_PROXY_PATCH.md); without it
         # the egress proxy strips Content-Length: 0 and Google returns 411.
+        # TASK-006 P1-B: the pre-registration deadline uses the highest
+        # max rate across GPU choices (most conservative = shortest wall
+        # time). The session name is known locally before the CLI `new`
+        # call, so the managed record and the lease are written BEFORE
+        # the call — a controller death in the allocation window leaves
+        # a record reconcile can resolve, not an invisible billing GPU.
+        # The post-probe update replaces this deadline with the
+        # budget-derived value at the actual live rate.
+        pre_max_rate = max(c["max_rate_cu_h"] for c in GPU_CHOICES.values())
+        pre_deadline = (datetime.datetime.now(datetime.timezone.utc)
+                        + datetime.timedelta(
+                            seconds=initial_session_wall_seconds(pre_max_rate)))
         for attempt in range(3):
             choice = choose_gpu_candidate(attempt)
             chosen_key = choice["key"]
             session = allocate_managed_session(choice, args.run_id)
             allocation_attempted = True
             record({"event": "allocation_attempt", "session": session, "gpu": chosen_key, "variant": variant, "run_id": args.run_id})
+            # TASK-006 P1-B: pre-register the session as `allocating`
+            # and the lease as non-final BEFORE the CLI `new` call.
+            # A lease-registration failure here raises before any GPU
+            # exists; the outer finally stops nothing (the session was
+            # never created) and the run fails closed.
+            from h3_session_watchdog import record_session
+
+            record_session(session, chosen_key, args.run_id, pre_deadline.isoformat(),
+                           production_task_id=args.production_task_id, status="allocating")
+            _register_gpu_lease(session, chosen_key, args.run_id,
+                                args.production_task_id, pre_deadline.isoformat(),
+                                args.per_session_budget_cu)
             try:
                 cmd = allocation_command(session, chosen_key, allow_g4=args.allow_g4, allow_a100_highmem=args.allow_a100_highmem)
                 # 420s: with the POST-body patch a G4 503 is retried inside
@@ -2069,25 +2450,23 @@ def run_variant(args) -> dict:
             break
         if not created or session is None:
             raise RuntimeError("GPU allocation did not complete")
-        # Watchdog record + background watcher. The initial deadline is
-        # derived from the 25 CU per-session cap minus the cleanup reserve
-        # at the chosen GPU's maximum allowed rate (no fixed 3600 s cutoff
-        # anymore); after the GPU probe the deadline is replaced with the
-        # budget-derived value from allowed_runtime_seconds() using the
-        # actual live rate.
-        initial_sec = initial_session_wall_seconds(GPU_CHOICES[chosen_key]["max_rate_cu_h"])
-        deadline = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=initial_sec)
-        from h3_session_watchdog import record_session
+        # TASK-006 P1-B: confirm the pre-registered record. The CLI
+        # returned, so the session is live and billable from here; the
+        # record moves allocating -> active. A missing record means the
+        # managed file lost the session — fail closed instead of
+        # proceeding with an unregistered GPU.
+        from h3_session_watchdog import confirm_session_active
 
-        session_rec = record_session(session, chosen_key, args.run_id, deadline.isoformat(),
-                                     production_task_id=args.production_task_id)
-        # TASK-006 P0-C: register the lease for the backup executor.
-        # Raises on local registry failure -> the exception propagates
-        # to the outer finally, which stops the just-created session
-        # (an unregistered lease is invisible to the backup executor).
-        _register_gpu_lease(session, chosen_key, args.run_id,
-                            args.production_task_id, deadline.isoformat(),
-                            args.per_session_budget_cu)
+        session_rec = confirm_session_active(session)
+        if session_rec is None:
+            raise RuntimeError(
+                f"pre-registered session record for {session} vanished; "
+                "refusing to proceed with an unregistered GPU")
+        # Watchdog record + background watcher. The pre-registration
+        # deadline (most conservative, from the highest max rate) stands
+        # until the GPU probe below, when it is replaced with the
+        # budget-derived value from allowed_runtime_seconds() using the
+        # actual live rate. No fixed 3600 s cutoff anymore.
         # Fail-closed watchdog startup (TASK-002 §6.1): the watcher must
         # prove it is alive, holding this session's record, and bound to
         # this task before any inference. On any startup failure the
@@ -2120,7 +2499,7 @@ def run_variant(args) -> dict:
             # GPU hardware probe before any expensive work.
             gpu_info = probe_actual_gpu(session, chosen_key)
             record({"event": "gpu_probed", "session": session, **gpu_info})
-            live = inspect()
+            live = _inspect_live(args.run_id)
             if live["rate"] is None or live["rate"] <= 0 or live["rate"] > args.max_rate_cu_h:
                 raise RuntimeError("Unknown/excessive live CU/hr rate")
             # Reconcile ledger with the live balance after allocation.
@@ -2150,129 +2529,11 @@ def run_variant(args) -> dict:
             record({"event": "watchdog_deadline_updated", "session": session,
                     "budget_sec": budget_sec, "rate_cu_h": live["rate"],
                     "deadline_utc": new_deadline.isoformat()})
-            # TASK-006 P0-B: the mount path only. The download path
-            # never calls drivemount: the worker downloads from Drive
-            # with a short-lived token instead.
-            drive_download = None
-            drive_upload = None
-            renewal_state = {"count": 0, "last_token_id": None}
-            if drive_source == "mount":
-                # Remote signature probe: verify drive.mount accepts timeout_ms
-                # before spending the mount window on a patched call the remote
-                # runtime would reject with TypeError.
-                sig = exec_script(session, ROOT / "h3_mount_signature_probe.py", timeout=120)
-                if not check_mount_signature(sig):
-                    raise RuntimeError("Remote drive.mount does not accept timeout_ms; abort before drivemount")
-                # Official interactive Drive mount (patched remote timeout 600s).
-                mount_drive(session, deadline_sec=budget_sec, run_id=args.run_id,
-                            timeline_path=run_dir / "mount_timeline.json")
-            exec_script(session, ROOT / "h3_init_remote.py", timeout=60)
-            # Upload poster, contract, assemble, manifest, workflow, submitted workflow.
-            api = validate_comfy_workflow(args.workflow_api, variant)
-            submitted_path = run_dir / f"workflow_{variant}_submitted.json"
-            submitted_path.write_text(json.dumps(api, ensure_ascii=False, indent=2))
-            for source, target in [
-                (ROOT / "assets" / "original_poster.jpg", REMOTE + "/poster.jpg"),
-                (ROOT / "h3_contract.py", REMOTE + "/h3_contract.py"),
-                (ROOT / "assemble.py", REMOTE + "/assemble.py"),
-                (Path(args.cache_manifest), REMOTE + "/model_manifest.json"),
-                (Path(args.workflow_api), REMOTE + "/workflow_api.json"),
-                (submitted_path, REMOTE + "/workflow_submitted.json"),
-            ]:
-                run_cli(["upload", "-s", session, str(source), target], timeout=300)
-            if drive_source == "mount":
-                mount_cfg = RUNS / f"mount_{session}.json"
-                mount_cfg.write_text(json.dumps({"drive_cache_dir": args.drive_cache_dir}))
-                run_cli(["upload", "-s", session, str(mount_cfg), REMOTE + "/drive_mount_config.json"], timeout=120)
-                mount_probe = exec_script(session, ROOT / "h3_drive_probe.py", timeout=180)
-                persist_exec_result(run_dir, f"drive_probe_{variant}", mount_probe)
-                if "MUSE_DRIVE_MOUNT_MODELS_VISIBLE 4" not in mount_probe["stdout"]:
-                    raise RuntimeError("Mounted Drive model cache not visible; release GPU")
-            else:
-                # Noninteractive path: deliver the worker token + a
-                # separate probe token, the download module, and the
-                # probe spec; prove the remote transport with a 1 MiB
-                # Range probe before the worker starts. The worker
-                # token file is deleted by the worker on first read.
-                drive_download = _build_drive_download_block(args.cache_manifest)
-                _mint_and_upload_drive_token(session, run_dir, "drive_token.json")
-                _mint_and_upload_drive_token(session, run_dir, "drive_token_probe.json")
-                probe_spec_path = run_dir / "drive_download_probe.json"
-                probe_spec_path.write_text(json.dumps(drive_download["probe"]))
-                run_cli(["upload", "-s", session, str(probe_spec_path),
-                         REMOTE + "/drive_download_probe.json"], timeout=120)
-                run_cli(["upload", "-s", session, str(ROOT / "h3_drive_download.py"),
-                         REMOTE + "/h3_drive_download.py"], timeout=120)
-                run_cli(["upload", "-s", session, str(ROOT / "h3_drive_download_probe.py"),
-                         REMOTE + "/h3_drive_download_probe.py"], timeout=120)
-                download_probe = exec_script(session, ROOT / "h3_drive_download_probe.py", timeout=180)
-                persist_exec_result(run_dir, f"drive_download_probe_{variant}", download_probe)
-                if "MUSE_DRIVE_DOWNLOAD_PROBE_OK" not in download_probe["stdout"]:
-                    raise RuntimeError("Remote Drive download probe failed; release GPU")
-                record({"event": "drive_download_probe_ok", "session": session,
-                        "run_id": args.run_id,
-                        "probe_file_id": drive_download["probe"]["file_id"]})
-                # TASK-006 P1-A: worker-side durable upload. Pre-create
-                # the run folder, mint the least-privilege drive.file
-                # token, and upload the stdlib uploader module. Any
-                # failure here is fail-soft: the worker simply gets no
-                # drive_upload block and the run falls back to the
-                # controller-side download + idempotent delivery.
-                try:
-                    drive_upload = _build_drive_upload_block(args.run_id, variant)
-                    import h3_drive_token
-
-                    _mint_and_upload_drive_token(
-                        session, run_dir, "drive_upload_token.json",
-                        mint_fn=h3_drive_token.mint_file_token)
-                    run_cli(["upload", "-s", session, str(ROOT / "h3_drive_upload.py"),
-                             REMOTE + "/h3_drive_upload.py"], timeout=120)
-                    record({"event": "drive_upload_block_ready", "session": session,
-                            "run_id": args.run_id,
-                            "folder_id": drive_upload["folder_id"]})
-                except Exception as e:  # noqa: BLE001 - fail-soft to controller delivery
-                    drive_upload = None
-                    record({"event": "drive_upload_block_failed", "session": session,
-                            "run_id": args.run_id, "error_type": type(e).__name__,
-                            "error": str(e)[:300]})
-            # Worker files go up only after the cache probe passed:
-            # the probe must run before the remote worker that does H3
-            # inference (and the test in test_auth_and_transport enforces
-            # this order). The launcher needs both files on the remote disk.
-            worker_uploads = [
-                (ROOT / "h3_job_state.py", REMOTE + "/h3_job_state.py"),
-                (ROOT / "h3_remote_worker.py", REMOTE + "/h3_remote_worker.py"),
-            ]
-            if drive_source == "download":
-                worker_uploads.append(
-                    (ROOT / "h3_drive_download.py", REMOTE + "/h3_drive_download.py"))
-            for source, target in worker_uploads:
-                run_cli(["upload", "-s", session, str(source), target], timeout=300)
-            # Single-variant remote worker.
-            elapsed = time.monotonic() - start
-            if elapsed > budget_sec:
-                raise TimeoutError("Budget wall time reached before " + variant)
-            task = {"variant": variant, "run_id": args.run_id, "drive_cache_dir": args.drive_cache_dir, "comfy_ref": args.comfy_ref,
-                    "inference_timeout_sec": min(1800, max(100, int(budget_sec - elapsed - 120))),
-                    "rate_cu_h": live["rate"],
-                    "session_budget_cu": round(budget_sec * float(live["rate"]) / 3600.0, 3),
-                    "comfyui_cache": _comfyui_cache_task(),
-                    "drive_source": drive_source}
-            if drive_source == "download":
-                # The worker downloads from Drive with the delivered
-                # short-lived token; drive_cache_dir is kept as the
-                # download staging dir for the worker's path handling.
-                task["drive_cache_dir"] = drive_download["dest_dir"]
-                task["drive_download"] = drive_download
-                # TASK-006 P1-A: the worker uploads the finished MP4
-                # itself when this block is present; absent, the run
-                # falls back to controller-side delivery.
-                if drive_upload is not None:
-                    task["drive_upload"] = drive_upload
-            task_path = RUNS / f"task_{session}.json"
-            task_path.write_text(json.dumps(task))
-            run_cli(["upload", "-s", session, str(task_path), REMOTE + "/task.json"], timeout=120)
-            _manifest_update(args.run_id, task_state="WORKER_STARTED", heartbeat=True)
+            # TASK-006 P1-B: the bootstrap sequence lives in
+            # _run_bootstrap (durable per-step state, resumable).
+            boot = _run_bootstrap(args, session, run_dir, budget_sec,
+                                live["rate"], start)
+            renewal_state = boot["renewal_state"]
             # Recoverable control plane (TASK-005 §4.2): short-start the
             # detached worker, then poll its durable state file. The old
             # single long blocking exec is gone: a controller restart no
@@ -2280,6 +2541,12 @@ def run_variant(args) -> dict:
             # the run back up from the manifest + state file.
             launch = launch_worker(session)
             record({"event": "worker_launched", "variant": variant, "session": session, "launch": launch})
+            # TASK-006 P1-B: record the launch durably. Resume uses it
+            # to tell "worker launched but unobservable" (refuse, never
+            # double-launch) from "worker never launched" (resume the
+            # bootstrap).
+            _manifest_update(args.run_id, bootstrap={
+                "steps": {"launch_worker": {"state": "done", "at_utc": _utc_now_iso()}}})
             try:
                 worker_state = wait_for_worker(
                     session, args.run_id, variant,
@@ -2335,7 +2602,7 @@ def run_variant(args) -> dict:
                     "state": "LOCAL_MP4_DOWNLOADED"})
             record({"event": "delivery_state", "variant": variant, "run_id": args.run_id,
                     "state": "LOCAL_MP4_VALIDATED"})
-            live = inspect()
+            live = _inspect_live(args.run_id)
             ledger = reconcile_budget(ledger, live["cu_balance"], LEDGER_PATH)
             # No return here: the GPU must be stopped (outer finally) BEFORE
             # any Drive upload. The result is stored and delivered after the
@@ -2521,6 +2788,11 @@ def main():
     parser.add_argument("--authorize-new-task", action="store_true",
                         help="Explicit user authorization to create a NEW 30 CU task ledger. "
                              "Required when no ledger exists yet for --production-task-id.")
+    parser.add_argument("--task-deadline-utc", default="",
+                        help="TASK-006 P1-C: the task deadline (UTC, YYYY-MM-DDTHH:MM:SSZ) "
+                             "for the deadline-bound end-to-end metric. Recorded on the "
+                             "task ledger at authorisation; a task without one is not in "
+                             "that metric's denominator. A recorded deadline never moves.")
     parser.add_argument("--prior-unbilled-reserve-cu", type=float, default=PRIOR_TASK_UNBILLED_RESERVE_CU)
     parser.add_argument("--gpu-policy", default="G4_THEN_A100_HIGHMEM")
     parser.add_argument("--variant", choices=("A", "B"), default=None)

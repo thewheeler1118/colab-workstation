@@ -283,12 +283,36 @@ def _validate_ledger(data: dict) -> dict:
             raise RuntimeError("Budget ledger effective hard-stop is not hard-stop plus prior reserve")
     if float(data.get("max_observed_spent_cu", 0)) < 0 or float(data["max_observed_spent_cu"]) > PROJECT_BUDGET_CU + 0.001:
         raise RuntimeError("Budget ledger max_observed_spent_cu out of range")
+    if data.get("deadline_utc") is not None:
+        # TASK-006 P1-C: the task deadline (metric F) must be a
+        # well-formed UTC timestamp when recorded.
+        try:
+            datetime.datetime.strptime(str(data["deadline_utc"]), "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            raise RuntimeError("Budget ledger deadline_utc is not a UTC timestamp (YYYY-MM-DDTHH:MM:SSZ)") from None
     return data
+
+
+def parse_task_deadline(value: str | None) -> str | None:
+    """Validate a --task-deadline-utc value (UTC, YYYY-MM-DDTHH:MM:SSZ).
+    Returns the value unchanged, or None when empty. Raises ValueError
+    on a malformed value — a deadline must never be silently repaired."""
+    if value is None or str(value).strip() == "":
+        return None
+    text = str(value).strip()
+    try:
+        datetime.datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        raise ValueError(
+            f"task deadline {text!r} is not a UTC timestamp "
+            "(expected YYYY-MM-DDTHH:MM:SSZ)") from None
+    return text
 
 
 def load_or_create_budget_ledger(path: Path, live_balance_cu: float, run_id: str,
                                  prior_unbilled_reserve_cu: float = 0.0,
-                                 authorize_new_task: bool = False) -> dict:
+                                 authorize_new_task: bool = False,
+                                 deadline_utc: str | None = None) -> dict:
     """Establish the baseline exactly once per production task. An existing
     ledger is never reset, even for a new run_id or a new variant.
     `prior_unbilled_reserve_cu` is the previous task's unbilled estimate,
@@ -314,6 +338,18 @@ def load_or_create_budget_ledger(path: Path, live_balance_cu: float, run_id: str
             raise RuntimeError("CU balance increased above ledger baseline; reconcile before GPU")
         if abs(float(prior_unbilled_reserve_cu) - float(data.get("prior_task_unbilled_reserve_cu", 0.0))) > 0.001:
             raise RuntimeError("Prior-task unbilled reserve does not match the ledger; reconcile before GPU")
+        # TASK-006 P1-C: a recorded deadline never moves silently. A
+        # ledger with no deadline adopts the first one passed (that is
+        # the first authorisation of a deadline, not a move); after
+        # that, a different value refuses.
+        if deadline_utc is not None:
+            recorded = data.get("deadline_utc")
+            if recorded is not None and recorded != deadline_utc:
+                raise RuntimeError(
+                    f"Task deadline mismatch: ledger records {recorded}, "
+                    f"got {deadline_utc}; deadlines never move silently")
+            if recorded is None:
+                data["deadline_utc"] = deadline_utc
         if run_id not in data.get("run_ids", []):
             data.setdefault("run_ids", []).append(run_id)
         data["updated_at_utc"] = _utc_now()
@@ -329,6 +365,10 @@ def load_or_create_budget_ledger(path: Path, live_balance_cu: float, run_id: str
         "authorized": True,
         "authorization": "user-explicit --authorize-new-task",
         "authorized_at_utc": _utc_now(),
+        # TASK-006 P1-C: the task deadline for the deadline-bound E2E
+        # metric. None when the task was authorised without one; such a
+        # task is not in the metric-F denominator.
+        "deadline_utc": deadline_utc,
         "initial_balance_cu": float(live_balance_cu),
         "hard_stop_balance_cu": hard_stop,
         "prior_task_unbilled_reserve_cu": float(prior_unbilled_reserve_cu),

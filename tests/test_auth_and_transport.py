@@ -75,14 +75,19 @@ class MountedCacheProbeTests(unittest.TestCase):
   # is unchanged: the cache probe must run before the remote worker that
   # does H3 inference. TASK-006 P0-B: the DEFAULT path probes the
   # noninteractive Drive download; the legacy mount path keeps its own
-  # probe-before-worker order.
+  # probe-before-worker order. TASK-006 P1-B: the bootstrap (probe +
+  # upload) was factored out of run_variant into _run_bootstrap; the
+  # order is asserted there, and run_variant must call _run_bootstrap
+  # before launch_worker.
   text=Path(h.__file__).read_text()
-  body=text[text.index("def run_variant"):]
+  body=text[text.index("def _run_bootstrap"):]
   self.assertIn("h3_drive_download_probe.py",body)
   self.assertIn("h3_remote_worker.py",body)
   self.assertLess(body.index("h3_drive_download_probe.py"),body.index("h3_remote_worker.py"))
   self.assertIn("h3_drive_probe.py",body)
   self.assertLess(body.index("h3_drive_probe.py"),body.index("h3_remote_worker.py"))
+  rv=text[text.index("def run_variant"):]
+  self.assertLess(rv.index("_run_bootstrap"),rv.index("launch_worker"))
 
 class LegacyVaeReuseTests(unittest.TestCase):
  def test_do_not_copy_legacy_without_matching_checksum(self):

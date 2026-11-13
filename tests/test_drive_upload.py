@@ -547,7 +547,7 @@ class WorkerUploadTests(unittest.TestCase):
         dt.write_token_file(
             self.root / "drive_upload_token.json",
             {"access_token": SECRET_A,
-             "expires_at_utc": "2026-11-13T10:00:00Z",
+             "expires_at_utc": "2030-01-01T10:00:00Z",
              "token_id": token_id_for(SECRET_A)})
         self.patches = [
             patch.object(hw, "ROOT", self.root),
@@ -662,7 +662,7 @@ class ControllerRecordTests(unittest.TestCase):
         def fake_file_token():
             minted["scope"] = "file"
             return {"access_token": SECRET_B,
-                    "expires_at_utc": "2026-11-13T10:00:00Z",
+                    "expires_at_utc": "2030-01-01T10:00:00Z",
                     "token_id": token_id_for(SECRET_B)}
 
         uploads = []
@@ -686,7 +686,7 @@ class ControllerRecordTests(unittest.TestCase):
         uploads = []
         state = {"count": 0, "last_token_id": None}
         fake_doc = {"access_token": SECRET_B,
-                    "expires_at_utc": "2026-11-13T10:00:00Z",
+                    "expires_at_utc": "2030-01-01T10:00:00Z",
                     "token_id": token_id_for(SECRET_B)}
         with patch.object(dt, "mint_readonly_token", return_value=fake_doc), \
                 patch.object(dt, "mint_file_token",

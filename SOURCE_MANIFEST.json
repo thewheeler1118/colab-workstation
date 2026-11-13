@@ -191,8 +191,8 @@
     },
     {
       "path": "docs/execution_flow.md",
-      "size_bytes": 12829,
-      "sha256": "41440b3fb6b014e9da5d0181643ef3e84096ed9a04f3c1cbb1ed5aa16b20af50",
+      "size_bytes": 15696,
+      "sha256": "3617330f42abccc0e6f7bb30bccdb36873c58520af4a2d075351b06ac18c54c5",
       "role": "Documentation / evidence"
     },
     {
@@ -413,8 +413,8 @@
     },
     {
       "path": "docs/module_inventory.md",
-      "size_bytes": 45065,
-      "sha256": "d31e5e523c6723718d49c47f61b5c9cce42b24eb4abe93ed538d16b26cb33d87",
+      "size_bytes": 48405,
+      "sha256": "2ee79e22f0f615d5fcd12c546ceb06877db3d3a4908bd383b600ece2f3c5c75c",
       "role": "Module inventory (this table's source of truth for hashes)"
     },
     {
@@ -427,6 +427,12 @@
       "path": "docs/muse_execute_auth_depot_video.md",
       "size_bytes": 15326,
       "sha256": "8d42e0c573c18568425d3588388a15c4687a759f39cc58af16141a7ac7a3c5a9",
+      "role": "Documentation / evidence"
+    },
+    {
+      "path": "docs/p1b-p1c-design.md",
+      "size_bytes": 17846,
+      "sha256": "818b4fdb15e396d3b002066c02ef49291cf9d7be36de2c9cf640ee48194956b8",
       "role": "Documentation / evidence"
     },
     {
@@ -457,6 +463,12 @@
       "path": "docs/runbooks/preflight.md",
       "size_bytes": 1951,
       "sha256": "e1962666a201342b07cc29f02373ff0613a3ecf69efb1a3b6bd5525501127b7a",
+      "role": "Documentation / evidence"
+    },
+    {
+      "path": "docs/runbooks/production-acceptance.md",
+      "size_bytes": 11071,
+      "sha256": "2d977564ae6f6eef8b9fe1e0b91754aa49e33bdcbb304745f0460e34ae9c857f",
       "role": "Documentation / evidence"
     },
     {
@@ -551,8 +563,8 @@
     },
     {
       "path": "h3_budget.py",
-      "size_bytes": 21236,
-      "sha256": "7646d3a7404c79b3a12bb2d7c4523f8be9ec360387f4d965509a0557020de184",
+      "size_bytes": 23246,
+      "sha256": "408afb4149b2339c36fd401ed2c313a43ea8a47886155c959390f2efa06d1915",
       "role": "Per-task CU ledger (30 CU) + GPU choice policy (G4/G4/A100_HIGH_MEM)"
     },
     {
@@ -569,8 +581,8 @@
     },
     {
       "path": "h3_controller.py",
-      "size_bytes": 136034,
-      "sha256": "659f758090ee71b2a593d250409b2a5f3d602dede492aea2f7d8c689917a1ed2",
+      "size_bytes": 148614,
+      "sha256": "7261998bb7b66552f640de0b50027cadab2766c3f25642817eaf74f2a7c2cb40",
       "role": "Run orchestration: preflight, allocation, mount, worker exec, download, stop"
     },
     {
@@ -671,8 +683,8 @@
     },
     {
       "path": "h3_reliability.py",
-      "size_bytes": 12086,
-      "sha256": "fab8ebe8149ed9ded26e46567c4e1203facb873f6110a56e921f100c82a2150b",
+      "size_bytes": 24883,
+      "sha256": "7166397fc5e839010461105817259e2e94f80c423133c411a013fa5b1d39f8d6",
       "role": "Supporting file"
     },
     {
@@ -689,20 +701,26 @@
     },
     {
       "path": "h3_run_manifest.py",
-      "size_bytes": 18912,
-      "sha256": "da8078fdeaebfb6748f09d45fe35389fc2cbb4ab4840faf2e38b0e87660ac36e",
+      "size_bytes": 21402,
+      "sha256": "404549d28f89b3ccce496eb0a8800134508fcb24b28b3d73ead7ff602f5f4f79",
       "role": "Supporting file"
     },
     {
       "path": "h3_session_watchdog.py",
-      "size_bytes": 27674,
-      "sha256": "915802074acb7c592f0369349690d151daabec634c477b934963e4da3aa3c29e",
+      "size_bytes": 30747,
+      "sha256": "1703aa2cfaddf82482187dc0399c5eb69c85297f6ee53797c473b55d221f3571",
       "role": "Managed-session registry, deadline watchdog, stop + reconcile"
     },
     {
       "path": "h3_shutdown_executor.py",
       "size_bytes": 10868,
       "sha256": "945d53f4d98a9fc01297a43a5e6b1459a3ce06a88e0a6548eb676a11ec61dab0",
+      "role": "Supporting file"
+    },
+    {
+      "path": "h3_task_lock.py",
+      "size_bytes": 4507,
+      "sha256": "20fc5a288b9d8ade0b41e9b7918c9bd2fa872f2bd60f9078c8e88939d1d933b2",
       "role": "Supporting file"
     },
     {
@@ -734,6 +752,12 @@
       "size_bytes": 1171,
       "sha256": "b149891e645453a0a9eaab319edfe4cbcc7520c46503798ec24ebc768e498ca1",
       "role": "Job definition / facade"
+    },
+    {
+      "path": "logs/h3_audit.jsonl",
+      "size_bytes": 748,
+      "sha256": "862f7cc4c9b0bdc1022b64556ba12aafce51cfa59b687e3ae929c7cbb5cc761d",
+      "role": "Supporting file"
     },
     {
       "path": "model_cache/verified_manifest.example.json",
@@ -929,8 +953,8 @@
     },
     {
       "path": "tests/test_auth_and_transport.py",
-      "size_bytes": 5235,
-      "sha256": "07ac31e0cb249bea653e0415d30b1f0bd9497d66fd4ccb71089f906ea479397e",
+      "size_bytes": 5555,
+      "sha256": "7d21a6962f0f30d6f77ac8e565df8f182df7fcb8cdbb044176f89adf82b4afb1",
       "role": "Tests: CLI lookup, ADC metadata, Drive mount gates, READY guards"
     },
     {
@@ -953,8 +977,8 @@
     },
     {
       "path": "tests/test_drive_delivery.py",
-      "size_bytes": 27250,
-      "sha256": "6f5f2b26c942a888ae36af4a89a92064ee126069f99b767056bcb87d39aab4f7",
+      "size_bytes": 27451,
+      "sha256": "48659db27d5c7df9ef9f58838f7e3b221202b771cd22306f18641f472e606bda",
       "role": "Tests"
     },
     {
@@ -966,7 +990,7 @@
     {
       "path": "tests/test_drive_download.py",
       "size_bytes": 34905,
-      "sha256": "0197fc1113d1412610be1f03bd80034a23067e1269788b98af9f0de917ee99e4",
+      "sha256": "b8f9e9014495e68375e24bb6fa96ab0458bc7577ad5d06347cb80f903e51d8ef",
       "role": "Tests"
     },
     {
@@ -984,7 +1008,7 @@
     {
       "path": "tests/test_drive_upload.py",
       "size_bytes": 30046,
-      "sha256": "b1a82b31fc884d05e2000da749eba0cd62fc2307a01eb67beb6c82b526d4925b",
+      "sha256": "9f43a9b08f8f056efbad9140ad80101e69c5ad709502a8bad73c2c7d434dd913",
       "role": "Tests"
     },
     {
@@ -1001,8 +1025,8 @@
     },
     {
       "path": "tests/test_fault_injection.py",
-      "size_bytes": 50035,
-      "sha256": "f6af129d44055c54e7810a94bae25c76b74217cca45d2ebf87227a71f1f9e8b6",
+      "size_bytes": 56435,
+      "sha256": "cbf4461447d4584b56548cf97d07638999067c13238fa3ad0928e119f66b8584",
       "role": "Tests"
     },
     {
@@ -1037,8 +1061,14 @@
     },
     {
       "path": "tests/test_recoverable_controller.py",
-      "size_bytes": 31555,
-      "sha256": "42e2d32039be5d11baf2e993ec981ededc29325b2dc11197b2e125390ecba55c",
+      "size_bytes": 32911,
+      "sha256": "d68e380347b6cb042625e022744159ace4e148bf263a47801f15a521b7408dee",
+      "role": "Tests"
+    },
+    {
+      "path": "tests/test_reliability.py",
+      "size_bytes": 13583,
+      "sha256": "86ab5111e2b1f54f18903f318e0950c02e1e6d4226fa8f5d69690bf8fc665998",
       "role": "Tests"
     },
     {
@@ -1049,8 +1079,8 @@
     },
     {
       "path": "tests/test_run_manifest.py",
-      "size_bytes": 15812,
-      "sha256": "669d1f69a2b201cce6dab383f47ba82c0d5c0b87d64885744a4253d4b1058a7c",
+      "size_bytes": 19343,
+      "sha256": "db3de03bf5b4e052dd0562e51183a64bccdc4e250d61277441ea9291d478d456",
       "role": "Tests"
     },
     {
@@ -1061,8 +1091,8 @@
     },
     {
       "path": "tests/test_session_state_tristate.py",
-      "size_bytes": 14544,
-      "sha256": "f3d4edb8512c9dd8adcf75ed3b7aab75de7b741725711fae51b224ff91e0814f",
+      "size_bytes": 17895,
+      "sha256": "d012740d67a490202f7430e30295a5f1acffb918475cb468c80e27e02c9d9fef",
       "role": "Tests"
     },
     {
@@ -1073,14 +1103,20 @@
     },
     {
       "path": "tests/test_stop_state_hotfix.py",
-      "size_bytes": 32507,
-      "sha256": "2b70b661dd121ad587e21f173d21a14c6f6131df82099f47e3a0dc89b0bdee5c",
+      "size_bytes": 32818,
+      "sha256": "b3214a21a16ccd8ac68531194b2a422d6cba1d42af1ad79d5b3f2a5651f149ab",
       "role": "Tests"
     },
     {
       "path": "tests/test_task_budget.py",
-      "size_bytes": 9259,
-      "sha256": "3b93a129f249659e9a2176b4481390ec3e168278f24503edddb38a79df9c540c",
+      "size_bytes": 11573,
+      "sha256": "a930790799647081fb1c760b9e9f38a70af58bce98e2a2888622f15786c51c07",
+      "role": "Tests"
+    },
+    {
+      "path": "tests/test_task_lock.py",
+      "size_bytes": 2148,
+      "sha256": "ed7ee4d141ea8d8a68fdf2690fbdb0be942fd069add722b00a4398d2cc03db90",
       "role": "Tests"
     },
     {

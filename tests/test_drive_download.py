@@ -396,7 +396,7 @@ class TokenFileTests(unittest.TestCase):
         td = tempfile.mkdtemp()
         self.addCleanup(lambda: __import__("shutil").rmtree(td, ignore_errors=True))
         doc = {"access_token": SECRET_A,
-               "expires_at_utc": "2026-11-13T09:00:00Z",
+               "expires_at_utc": "2030-01-01T09:00:00Z",
                "token_id": token_id_for(SECRET_A)}
         path = Path(td) / "drive_token.json"
         dt.write_token_file(path, doc)
@@ -407,7 +407,7 @@ class TokenFileTests(unittest.TestCase):
 
     def test_validate_rejects_mismatched_token_id(self):
         doc = {"access_token": SECRET_A,
-               "expires_at_utc": "2026-11-13T09:00:00Z",
+               "expires_at_utc": "2030-01-01T09:00:00Z",
                "token_id": "deadbeefdeadbeef"}
         with self.assertRaises(ValueError):
             dd.validate_token_doc(doc)
@@ -417,7 +417,7 @@ class TokenFileTests(unittest.TestCase):
         self.addCleanup(lambda: __import__("shutil").rmtree(td, ignore_errors=True))
         path = Path(td) / "drive_token.json"
         first = {"access_token": SECRET_A,
-                 "expires_at_utc": "2026-11-13T09:00:00Z",
+                 "expires_at_utc": "2030-01-01T09:00:00Z",
                  "token_id": token_id_for(SECRET_A)}
         dt.write_token_file(path, first)
         provider = FileTokenProvider(path)
@@ -426,7 +426,7 @@ class TokenFileTests(unittest.TestCase):
         # Token near expiry + a fresh file delivered: provider picks it up.
         provider._expires_at = time.time() + 60
         second = {"access_token": SECRET_B,
-                  "expires_at_utc": "2026-11-13T10:00:00Z",
+                  "expires_at_utc": "2030-01-01T10:00:00Z",
                   "token_id": token_id_for(SECRET_B)}
         dt.write_token_file(path, second)
         self.assertEqual(provider.get_token(), SECRET_B)
@@ -527,7 +527,7 @@ class ControllerRenewalTests(unittest.TestCase):
         uploads = []
         records = []
         fake_doc = {"access_token": SECRET_B,
-                    "expires_at_utc": "2026-11-13T10:00:00Z",
+                    "expires_at_utc": "2030-01-01T10:00:00Z",
                     "token_id": token_id_for(SECRET_B)}
         with patch.object(self.hc, "run_cli", lambda cmd, timeout=90, check=True: uploads.append(cmd) or {"returncode": 0, "stdout": "", "stderr": ""}), \
                 patch.object(self.hc, "record", lambda data: records.append(data)), \
@@ -577,7 +577,7 @@ class ControllerRenewalTests(unittest.TestCase):
         manifest_path = Path(self.td) / "verified_manifest.json"
         manifest_path.write_text(json.dumps(manifest))
         fake_doc = {"access_token": SECRET_A,
-                    "expires_at_utc": "2026-11-13T09:00:00Z",
+                    "expires_at_utc": "2030-01-01T09:00:00Z",
                     "token_id": token_id_for(SECRET_A)}
         args = MagicMock()
         args.cache_manifest = str(manifest_path)

@@ -203,11 +203,36 @@ class WaitForWorkerTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "inference_submit.*prompt rejected"):
                 hc.wait_for_worker(SESSION, RUN_ID, "A", deadline_monotonic=1e9)
 
-    def test_three_consecutive_poll_failures_raise(self):
+    def test_poll_failures_degrade_then_wall_time_ends_run(self):
+        # TASK-006 P1-B (Issue #50): poll failures are transient, not a
+        # task failure. After 3 consecutive failures the run is marked
+        # degraded (audit event + manifest transient error) and polling
+        # CONTINUES; only the budget wall time ends the run. A fake
+        # clock advances on every sleep so the wall time arrives fast.
+        now = [1000.0]
+
+        def _sleep(s):
+            now[0] += s
+
         with mock.patch.object(hc, "poll_worker",
-                               side_effect=hc.WorkerPollError("probe exec failed")):
-            with self.assertRaisesRegex(RuntimeError, "unobservable after 3 consecutive"):
-                hc.wait_for_worker(SESSION, RUN_ID, "A", deadline_monotonic=1e9)
+                               side_effect=hc.WorkerPollError("probe exec failed")), \
+                mock.patch.object(hc.time, "sleep", side_effect=_sleep), \
+                mock.patch.object(hc.time, "monotonic", side_effect=lambda: now[0]), \
+                mock.patch.object(hc, "_manifest_update") as manifest_update, \
+                mock.patch.object(hc, "record") as record:
+            with self.assertRaisesRegex(
+                    TimeoutError, "did not finish before the budget wall time"):
+                hc.wait_for_worker(SESSION, RUN_ID, "A",
+                                   deadline_monotonic=1000.0 + 180,
+                                   poll_interval_sec=60)
+        # Degraded was recorded exactly once, as a transient — not a failure.
+        degraded = [c for c in record.call_args_list
+                    if c[0][0].get("event") == "poll_degraded"]
+        self.assertEqual(len(degraded), 1)
+        self.assertEqual(degraded[0][0][0]["consecutive_failures"], 3)
+        transient_calls = [c for c in manifest_update.call_args_list
+                           if "transient_error" in c[1]]
+        self.assertEqual(len(transient_calls), 1)
 
     def test_transient_poll_failure_recovers(self):
         states = [_state(stage="VIDEO_READY", output=DONE)]
