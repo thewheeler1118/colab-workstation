@@ -9,11 +9,14 @@
 #   pass --production-task-id h3-ab-20261111 explicitly, no new flag.
 # Forwards to: python3 h3_controller.py run --execute --confirm-gpu
 #   --authorize-task-gpu --allow-g4 --allow-a100-highmem
-#   --approve-interactive-drive-mount --fresh-inference
+#   --fresh-inference
 #   --variant A|B --run-id ID --production-task-id ID [--authorize-new-task]
 # The controller itself enforces: 30 CU task budget, 25 CU per-session cap,
-# G4_THEN_A100_HIGHMEM policy, pinned ComfyUI commit, interactive TTY for
-# the official drivemount, and a Drive path under /content/drive.
+# G4_THEN_A100_HIGHMEM policy, pinned ComfyUI commit, and (TASK-006 P0-B)
+# the noninteractive Drive download preflight before allocation. The
+# legacy interactive mount path needs --drive-source mount plus
+# --approve-interactive-drive-mount and a TTY; this script does not pass
+# them, so it runs the download path by default.
 # This script creates a PAID GPU session and spends CU. Do not run it from CI.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -38,4 +41,4 @@ if [ -z "$RUN_ID" ]; then echo "REFUSED: --run-id is required" >&2; exit 2; fi
 if [ -z "$TASK_ID" ]; then echo "REFUSED: --production-task-id is required (the historical default is never reused silently)" >&2; exit 2; fi
 EXTRA=()
 if [ "$AUTHORIZE_NEW_TASK" -eq 1 ]; then EXTRA+=(--authorize-new-task); fi
-exec python3 h3_controller.py run --execute --confirm-gpu --authorize-task-gpu --allow-g4 --allow-a100-highmem --approve-interactive-drive-mount --fresh-inference --variant "$VARIANT" --run-id "$RUN_ID" --production-task-id "$TASK_ID" "${EXTRA[@]}"
+exec python3 h3_controller.py run --execute --confirm-gpu --authorize-task-gpu --allow-g4 --allow-a100-highmem --fresh-inference --variant "$VARIANT" --run-id "$RUN_ID" --production-task-id "$TASK_ID" "${EXTRA[@]}"

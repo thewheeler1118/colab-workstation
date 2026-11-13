@@ -5,7 +5,9 @@ How to work in this repo. Read this before changing anything.
 ## The rules that matter most
 
 1. **Never spend CU or create a GPU from a routine task.** Live runs need
-   the user's explicit go-ahead for THAT task, `--confirm-live`, and a TTY.
+   the user's explicit go-ahead for THAT task and `--confirm-live`.
+   (A TTY is only needed for the legacy interactive mount path; the
+   default download path is noninteractive — TASK-006 P0-B.)
    CI never touches a GPU, Drive, or any credential.
 2. **Per-task 30 CU, never cumulative** (ADR-001). If someone says "add
    30 CU", treat it as a NEW task with its own ledger — never top up an

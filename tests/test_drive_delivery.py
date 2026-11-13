@@ -61,6 +61,21 @@ def _args():
         prior_unbilled_reserve_cu=0.14, authorize_new_task=False)
 
 
+# TASK-006 P0-B: the chain harness stubs the download-path boundaries
+# (preflight, block builder, token upload) the same way it already
+# stubs mount_drive / verify_ready / validate_local. The real builder,
+# preflight and token upload are covered by tests/test_drive_download.py.
+_CANNED_DOWNLOAD_BLOCK = {
+    "files": [{"file_id": "fid-1",
+               "path": "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+               "size": 10, "sha256": "a" * 64, "md5": "b" * 32}],
+    "comfyui": None,
+    "dest_dir": "/content/muse_h3/drive_downloads",
+    "token_file": "/content/muse_h3/drive_token.json",
+    "probe": {"file_id": "fid-1"},
+}
+
+
 class DeliverVariantTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -220,6 +235,13 @@ class RunVariantDeliveryTest(unittest.TestCase):
         # below proves the gate blocks allocation when it fails).
         self.mocks["env"] = self._po(hc, "verify_environment",
                                       return_value={"ok": True, "checked": []})
+        self._po(hc, "verify_drive_download_preflight",
+                 return_value={"preflight": "ok"})
+        self._po(hc, "_build_drive_download_block",
+                 return_value=_CANNED_DOWNLOAD_BLOCK)
+        self._po(hc, "_mint_and_upload_drive_token",
+                 return_value={"token_id": "test-token-id",
+                               "remote_path": "/content/muse_h3/drive_token.json"})
         self._po(hc, "initialize_project_budget",
                  return_value={"max_observed_spent_cu": 0.0,
                                "production_task_id": "h3-ab-20261111"})
@@ -236,7 +258,8 @@ class RunVariantDeliveryTest(unittest.TestCase):
         self._po(hc, "allowed_runtime_seconds", return_value=3600)
         self._po(hc, "initial_session_wall_seconds", return_value=3600)
         self._po(hc, "exec_script",
-                 return_value={"stdout": "MUSE_DRIVE_MOUNT_MODELS_VISIBLE 4",
+                 return_value={"stdout": "MUSE_DRIVE_MOUNT_MODELS_VISIBLE 4\n"
+                               "MUSE_DRIVE_DOWNLOAD_PROBE_OK fid-1 10 10",
                                "returncode": 0})
         self._po(hc, "check_mount_signature", return_value=True)
         self._po(hc, "mount_drive", return_value={})

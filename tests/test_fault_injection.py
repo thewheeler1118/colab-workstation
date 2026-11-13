@@ -88,6 +88,21 @@ def _args(action="run", **over):
     return SimpleNamespace(**kw)
 
 
+# TASK-006 P0-B: the chain harness stubs the download-path boundaries
+# (preflight, block builder, token upload) the same way it already
+# stubs mount_drive / verify_ready / validate_local. The real builder,
+# preflight and token upload are covered by tests/test_drive_download.py.
+_CANNED_DOWNLOAD_BLOCK = {
+    "files": [{"file_id": "fid-1",
+               "path": "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+               "size": 10, "sha256": "a" * 64, "md5": "b" * 32}],
+    "comfyui": None,
+    "dest_dir": "/content/muse_h3/drive_downloads",
+    "token_file": "/content/muse_h3/drive_token.json",
+    "probe": {"file_id": "fid-1"},
+}
+
+
 def _job_state(stage, output=None, error=None):
     state = {"run_id": RUN_ID, "variant": "A", "stage": stage}
     if output is not None:
@@ -185,6 +200,13 @@ class ChainHarness:
         self._po(hc, "validate_local")
         self._po(hc, "validate_comfy_workflow", return_value={})
         self._po(hc, "verify_environment", side_effect=self._fake_env)
+        self._po(hc, "verify_drive_download_preflight",
+                 return_value={"preflight": "ok"})
+        self._po(hc, "_build_drive_download_block",
+                 return_value=_CANNED_DOWNLOAD_BLOCK)
+        self._po(hc, "_mint_and_upload_drive_token",
+                 return_value={"token_id": "test-token-id",
+                               "remote_path": "/content/muse_h3/drive_token.json"})
         self._po(hc, "initialize_project_budget",
                  return_value={"max_observed_spent_cu": 0.0,
                                "production_task_id": TASK,
@@ -342,6 +364,9 @@ class ChainHarness:
         if name == "h3_drive_probe.py":
             return {"returncode": 0, "stdout":
                     "MUSE_DRIVE_MOUNT_MODELS_VISIBLE 4", "stderr": ""}
+        if name == "h3_drive_download_probe.py":
+            return {"returncode": 0, "stdout":
+                    "MUSE_DRIVE_DOWNLOAD_PROBE_OK fid-1 10 10", "stderr": ""}
         return {"returncode": 0, "stdout": "", "stderr": ""}
 
     def _fake_download(self, session, variant, run_id):
