@@ -413,8 +413,8 @@
     },
     {
       "path": "docs/module_inventory.md",
-      "size_bytes": 37589,
-      "sha256": "562fa28b6f1f7bacedc3d6ec0ed619e3cfabf2cfd6f8bdba91fbda2ae5f2b4d1",
+      "size_bytes": 38603,
+      "sha256": "d7064d2cded31097c9567f6192f4e5de8fe0131fc1f18a6c24f8a1e195031b25",
       "role": "Module inventory (this table's source of truth for hashes)"
     },
     {
@@ -628,6 +628,12 @@
       "role": "Remote final-MP4 ffprobe check (OUTPUT_CHECK_JSON, 274f/24fps/1080x1920)"
     },
     {
+      "path": "h3_reliability.py",
+      "size_bytes": 12086,
+      "sha256": "fab8ebe8149ed9ded26e46567c4e1203facb873f6110a56e921f100c82a2150b",
+      "role": "Supporting file"
+    },
+    {
       "path": "h3_remote_worker.py",
       "size_bytes": 42766,
       "sha256": "ca94de29ff4a0ef82c4d501ebe82825bc117ca743e74b4bae51e73a1851723ba",
@@ -802,6 +808,12 @@
       "role": "Operator wrapper / offline check"
     },
     {
+      "path": "scripts/reliability_report.py",
+      "size_bytes": 1662,
+      "sha256": "5bd1084766425a4e3869cb7d409aee098d5de81f54f409b542b64d01896bcce5",
+      "role": "Operator wrapper / offline check"
+    },
+    {
       "path": "scripts/run_h3_ab.sh",
       "size_bytes": 2500,
       "sha256": "f3573db85b685c59fc59c4f684c1c10fcf717b68bb4ffaf1f4d5d267dee21da3",
@@ -961,6 +973,12 @@
       "path": "tests/test_recoverable_controller.py",
       "size_bytes": 30377,
       "sha256": "434dea407955e3073b9de26a911ebe947004c12ddf72f168089c46033b753ae1",
+      "role": "Tests"
+    },
+    {
+      "path": "tests/test_reliability_metrics.py",
+      "size_bytes": 9961,
+      "sha256": "01d67e9657dc0862fbafeee22ccc2c575cdd5c0a43c38c2ddae1cf184d4b0d3f",
       "role": "Tests"
     },
     {
