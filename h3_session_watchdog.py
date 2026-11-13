@@ -10,6 +10,11 @@ file. It never touches other Colab sessions.
 State file: model_cache/h3_managed_sessions.json (mode 0600).
 A VM restart cannot be guaranteed to keep this process alive; that limit
 is recorded in the run report as a risk, never claimed as an absolute cap.
+
+Independent shutdown: this watchdog is a local Muse VM process. No
+independent shutdown executor is deployed or verified (see
+docs/watchdog_independence.md). Status: INDEPENDENT_SHUTDOWN_NOT_GUARANTEED.
+Never substitute a remote `kill -9` for a real GPU session stop.
 """
 from __future__ import annotations
 
@@ -260,17 +265,69 @@ def query_session_state(session_id: str, colab_auth: str = "adc") -> SessionStat
     return SessionState.ACTIVE if session_id in names else SessionState.STOPPED
 
 
-def stop_session(session_id: str, colab_auth: str = "adc") -> bool:
-    """Stop a managed session and confirm it is gone. Returns True only
-    when a reliable re-query reports STOPPED. A query that returns
-    UNKNOWN never counts as confirmed (TASK-005 §3). The structured
-    stop contract (bounded confirmation + escalation) is Issue #25."""
-    for _ in range(3):
-        _run_colab(["stop", "-s", session_id], colab_auth=colab_auth, timeout=65)
+def stop_session(session_id: str, colab_auth: str = "adc", max_attempts: int = 3) -> dict:
+    """Stop a managed session with a confirmed verdict (TASK-005 §3,
+    Issue #25). Returns a structured result, never a bare bool:
+
+    {"session", "state", "stop_cli_ok", "attempts", "queries", "error"}
+
+    Contract:
+    1. Call the official stop CLI and record its exit code.
+    2. Re-query the real session state (three-state, Issue #24).
+    3. Report success ONLY on explicit STOPPED.
+    4. UNKNOWN -> bounded re-confirmation, then escalate as UNKNOWN
+       (never as STOPPED).
+    5. This function stops exactly the id it is given. Callers that must
+       never touch a non-project session use stop_managed_session(),
+       which refuses ids absent from the managed file.
+    6. The caller must not clear the managed record unless state is
+       STOPPED.
+    """
+    attempts = 0
+    queries = 0
+    stop_cli_ok = None
+    last_error: str | None = None
+    last_state = SessionState.UNKNOWN
+    while attempts < max_attempts:
+        attempts += 1
+        try:
+            p = _run_colab(["stop", "-s", session_id], colab_auth=colab_auth, timeout=65)
+            stop_cli_ok = (p.returncode == 0)
+            if not stop_cli_ok:
+                last_error = (f"stop CLI exit {p.returncode}: "
+                              f"{(p.stderr or p.stdout or '')[-300:]}")
+        except Exception as e:  # noqa: BLE001 - timeout / missing CLI
+            stop_cli_ok = False
+            last_error = f"stop CLI failed: {e}"
         time.sleep(3)
-        if query_session_state(session_id, colab_auth=colab_auth) is SessionState.STOPPED:
-            return True
-    return False
+        last_state = query_session_state(session_id, colab_auth=colab_auth)
+        queries += 1
+        if last_state is SessionState.STOPPED:
+            return {"session": session_id, "state": "STOPPED", "stop_cli_ok": stop_cli_ok,
+                    "attempts": attempts, "queries": queries, "error": None}
+        if last_state is SessionState.UNKNOWN:
+            last_error = "session state UNKNOWN after stop; cannot confirm"
+            continue
+        last_error = "session still ACTIVE after stop"
+    return {"session": session_id, "state": last_state.value, "stop_cli_ok": stop_cli_ok,
+            "attempts": attempts, "queries": queries, "error": last_error}
+
+
+def stop_managed_session(session_id: str, colab_auth: str = "adc",
+                         path: Path = STATE_PATH) -> dict:
+    """Stop a session only if it is in our managed file. An id absent
+    from the file (or already marked stopped) is refused without calling
+    the CLI, so a non-project session is never stopped (TASK-005 §3)."""
+    sessions = load_managed_sessions(path)
+    rec = next((s for s in sessions if s.get("session_id") == session_id), None)
+    if rec is None:
+        return {"session": session_id, "state": "REFUSED_NOT_MANAGED", "stop_cli_ok": None,
+                "attempts": 0, "queries": 0,
+                "error": "session id is not in the managed-session file"}
+    if rec.get("status") != "active":
+        return {"session": session_id, "state": "ALREADY_STOPPED", "stop_cli_ok": None,
+                "attempts": 0, "queries": 0, "error": None}
+    return stop_session(session_id, colab_auth=colab_auth)
 
 
 def reconcile_on_startup(colab_auth: str = "adc", path: Path = STATE_PATH) -> dict:
@@ -404,11 +461,12 @@ def watch(session_id: str, colab_auth: str = "adc", poll_sec: int = 60,
         stop, reason = should_stop(rec, balance, ledger, rate_cu_h=rate)
         if stop:
             print(f"watchdog: stopping {session_id}: {reason}", flush=True)
-            ok = stop_session(session_id, colab_auth=colab_auth)
-            if ok:
+            result = stop_managed_session(session_id, colab_auth=colab_auth)
+            if result["state"] == "STOPPED":
                 mark_session_stopped(session_id)
                 return 0
-            print(f"watchdog: CRITICAL could not stop {session_id}", file=sys.stderr)
+            print(f"watchdog: CRITICAL could not confirm stop of {session_id}: "
+                  f"{json.dumps(result, ensure_ascii=False)}", file=sys.stderr)
             return 1
         time.sleep(poll_sec)
 
@@ -447,11 +505,11 @@ def main() -> int:
         print(json.dumps(reconcile_on_startup(a.colab_auth), indent=2))
         return 0
     if a.cmd == "stop":
-        ok = stop_session(a.session, a.colab_auth)
-        if ok:
+        result = stop_managed_session(a.session, a.colab_auth)
+        if result["state"] == "STOPPED":
             mark_session_stopped(a.session)
-        print(json.dumps({"session": a.session, "stopped_confirmed": ok}, indent=2))
-        return 0 if ok else 1
+        print(json.dumps(result, indent=2))
+        return 0 if result["state"] == "STOPPED" else 1
     return 1
 
 

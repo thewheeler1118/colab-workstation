@@ -754,9 +754,11 @@ def stop_and_verify_session(session: str) -> dict:
     from h3_session_watchdog import SessionState, query_session_state
 
     stop_ok = False
+    last_state = SessionState.UNKNOWN
     for attempt in range(3):
         try:
             state = query_session_state(session)
+            last_state = state
             if state is SessionState.STOPPED:
                 stop_ok = True
                 break
@@ -767,6 +769,7 @@ def stop_and_verify_session(session: str) -> dict:
                 continue
             run_cli(["stop", "-s", session], timeout=65)
             state = query_session_state(session)
+            last_state = state
             if state is SessionState.STOPPED:
                 stop_ok = True
                 try:
@@ -784,7 +787,7 @@ def stop_and_verify_session(session: str) -> dict:
         time.sleep(3)
     if not stop_ok:
         record({"event": "CRITICAL_ORPHAN_RISK", "session": session})
-    return {"session": session, "stopped_confirmed": stop_ok}
+    return {"session": session, "stopped_confirmed": stop_ok, "state": last_state.value}
 
 
 def reconcile_run_state(run_id: str) -> dict:

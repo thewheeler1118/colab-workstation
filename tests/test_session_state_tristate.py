@@ -172,7 +172,11 @@ class WatchUnknownTest(unittest.TestCase):
                     mock.patch.object(wd, "LEDGER_PATH", ledger), \
                     mock.patch.object(wd, "query_session_state",
                                       return_value=SessionState.UNKNOWN), \
-                    mock.patch.object(wd, "stop_session", return_value=False), \
+                    mock.patch.object(wd, "stop_managed_session",
+                                      return_value={"session": SID, "state": "UNKNOWN",
+                                                    "stop_cli_ok": False, "attempts": 3,
+                                                    "queries": 3,
+                                                    "error": "session state UNKNOWN after stop"}), \
                     mock.patch("h3_budget.read_live_usage",
                                return_value={"balance": 160.0, "rate": 8.88}), \
                     mock.patch("auth_support.resolve_colab_executable",
@@ -189,7 +193,11 @@ class StopSessionTristateTest(unittest.TestCase):
                 mock.patch.object(wd, "query_session_state",
                                   return_value=SessionState.STOPPED), \
                 mock.patch("time.sleep"):
-            self.assertTrue(stop_session(SID))
+            result = stop_session(SID)
+        self.assertEqual(result["state"], "STOPPED")
+        self.assertTrue(result["stop_cli_ok"])
+        self.assertEqual(result["attempts"], 1)
+        self.assertIsNone(result["error"])
         run.assert_called_once()
         self.assertEqual(run.call_args[0][0], ["stop", "-s", SID])
 
@@ -199,7 +207,10 @@ class StopSessionTristateTest(unittest.TestCase):
                 mock.patch.object(wd, "query_session_state",
                                   return_value=SessionState.ACTIVE), \
                 mock.patch("time.sleep"):
-            self.assertFalse(stop_session(SID))
+            result = stop_session(SID)
+        self.assertEqual(result["state"], "ACTIVE")
+        self.assertEqual(result["attempts"], 3)
+        self.assertIsNotNone(result["error"])
 
     def test_stop_not_confirmed_on_unknown(self):
         with mock.patch.object(wd, "_run_colab",
@@ -207,9 +218,11 @@ class StopSessionTristateTest(unittest.TestCase):
                 mock.patch.object(wd, "query_session_state",
                                   return_value=SessionState.UNKNOWN) as q, \
                 mock.patch("time.sleep"):
-            self.assertFalse(stop_session(SID))
+            result = stop_session(SID)
+        self.assertEqual(result["state"], "UNKNOWN")
         self.assertEqual(run.call_count, 3)
         self.assertEqual(q.call_count, 3)
+        self.assertEqual(result["attempts"], 3)
 
 
 class ControllerStopTest(unittest.TestCase):
@@ -220,6 +233,7 @@ class ControllerStopTest(unittest.TestCase):
                 mock.patch.object(hc, "record"):
             out = hc.stop_and_verify_session(SID)
         self.assertTrue(out["stopped_confirmed"])
+        self.assertEqual(out["state"], "STOPPED")
         run_cli.assert_not_called()
 
     def test_active_then_stopped(self):
@@ -233,6 +247,7 @@ class ControllerStopTest(unittest.TestCase):
                 mock.patch("time.sleep"):
             out = hc.stop_and_verify_session(SID)
         self.assertTrue(out["stopped_confirmed"])
+        self.assertEqual(out["state"], "STOPPED")
         run_cli.assert_called_once_with(["stop", "-s", SID], timeout=65)
         events = [c.args[0]["event"] for c in rec.call_args_list]
         self.assertIn("stopped", events)
@@ -245,6 +260,7 @@ class ControllerStopTest(unittest.TestCase):
                 mock.patch("time.sleep"):
             out = hc.stop_and_verify_session(SID)
         self.assertFalse(out["stopped_confirmed"])
+        self.assertEqual(out["state"], "UNKNOWN")
         run_cli.assert_not_called()
         events = [c.args[0]["event"] for c in rec.call_args_list]
         self.assertIn("CRITICAL_ORPHAN_RISK", events)
@@ -259,6 +275,7 @@ class ControllerStopTest(unittest.TestCase):
                 mock.patch("time.sleep"):
             out = hc.stop_and_verify_session(SID)
         self.assertFalse(out["stopped_confirmed"])
+        self.assertEqual(out["state"], "ACTIVE")
         events = [c.args[0]["event"] for c in rec.call_args_list]
         self.assertIn("CRITICAL_ORPHAN_RISK", events)
 

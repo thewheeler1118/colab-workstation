@@ -413,8 +413,8 @@
     },
     {
       "path": "docs/module_inventory.md",
-      "size_bytes": 31154,
-      "sha256": "19a6e374098a8d04dac2ab9db7c021494a1a171d8a7d602a807b08784187af53",
+      "size_bytes": 31473,
+      "sha256": "d08f5759a78e2178bcc391717c3ccbb05126c96b638af55c89cfea77de70e68b",
       "role": "Module inventory (this table's source of truth for hashes)"
     },
     {
@@ -496,6 +496,12 @@
       "role": "Documentation / evidence"
     },
     {
+      "path": "docs/watchdog_independence.md",
+      "size_bytes": 2695,
+      "sha256": "f67178ae2139d99b2d8f89c97504a97784052a005856d0ea41a36088331b15a8",
+      "role": "Documentation / evidence"
+    },
+    {
       "path": "drive_api.py",
       "size_bytes": 3329,
       "sha256": "5c3dc379e156fdc81c42b86d4bc9f119b51d4db80750e769432968bd2c30d545",
@@ -545,8 +551,8 @@
     },
     {
       "path": "h3_controller.py",
-      "size_bytes": 67372,
-      "sha256": "393f5574333df97ef083e3057bb65363c3171d69382aa8f4de75ec025e94d3bb",
+      "size_bytes": 67499,
+      "sha256": "d84174ea9c74a370c06542473dc950d32536771c43019654a360e3cd4adbe46f",
       "role": "Run orchestration: preflight, allocation, mount, worker exec, download, stop"
     },
     {
@@ -605,8 +611,8 @@
     },
     {
       "path": "h3_session_watchdog.py",
-      "size_bytes": 19317,
-      "sha256": "47adff02e017eb5f438f486849d72720e790bdf56695070201d0dd81f7f600b8",
+      "size_bytes": 22283,
+      "sha256": "c22ba9523187a5060cab6cb5c72395d637bfe28f925ade32c0d5f02e380a4c03",
       "role": "Managed-session registry, deadline watchdog, stop + reconcile"
     },
     {
@@ -881,8 +887,8 @@
     },
     {
       "path": "tests/test_session_state_tristate.py",
-      "size_bytes": 12490,
-      "sha256": "6e689f8e53c95c88ae239a191c7c7eeb958c18910cd2c025473241b6b8f138c8",
+      "size_bytes": 13430,
+      "sha256": "07442a7cd0e7a75b8a4f863d4829b4f352315e08a5ed5ebe3a41a3f0c0136854",
       "role": "Tests"
     },
     {
@@ -895,6 +901,12 @@
       "path": "tests/test_watchdog_fail_closed.py",
       "size_bytes": 9455,
       "sha256": "afdac1778a0be42b8dcc63ab48d175350737813b23a9520e395ffae430642397",
+      "role": "Tests"
+    },
+    {
+      "path": "tests/test_watchdog_shutdown.py",
+      "size_bytes": 10595,
+      "sha256": "3a4f84bbe5fec3423416a3fd5f014bab7258fc801661312879298aa79c952c06",
       "role": "Tests"
     },
     {
