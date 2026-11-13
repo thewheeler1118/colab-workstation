@@ -440,31 +440,24 @@ class ProductionTest(unittest.TestCase):
 
     def test_stop_attempted_after_worker_error(self):
         import h3_controller
+        from h3_session_watchdog import SessionState
         calls = []
 
         def fake_run_cli(cmd, timeout=90, check=True):
             calls.append(cmd)
-            if cmd and cmd[0] == "sessions":
-                return {"args": cmd, "returncode": 0, "stdout": "muse-h3-abc123\n", "stderr": ""}
             if cmd and cmd[0] == "stop":
                 calls.append(["_stop_called"])
                 return {"args": cmd, "returncode": 0, "stdout": "", "stderr": ""}
             return {"args": cmd, "returncode": 0, "stdout": "", "stderr": ""}
 
-        # stop_and_verify_session consults inspect(), which calls run_cli.
-        # Simulate: first sessions call lists the session, stop succeeds,
-        # second sessions call is empty.
-        states = {"n": 0}
-
-        def fake_inspect():
-            states["n"] += 1
-            if states["n"] == 1:
-                return {"cu_balance": 160.0, "rate": 0.0, "sessions": [{"name": "muse-h3-abc123", "gpu": "G4"}]}
-            return {"cu_balance": 160.0, "rate": 0.0, "sessions": []}
-
-        with mock.patch.object(h3_controller, "inspect", fake_inspect), \
+        # stop_and_verify_session consults the three-state query (TASK-005
+        # §3): first ACTIVE (stop is attempted), then STOPPED (confirmed).
+        with mock.patch("h3_session_watchdog.query_session_state",
+                        side_effect=[SessionState.ACTIVE, SessionState.STOPPED]), \
              mock.patch.object(h3_controller, "run_cli", fake_run_cli), \
-             mock.patch.object(h3_controller, "record", lambda data: None):
+             mock.patch.object(h3_controller, "record", lambda data: None), \
+             mock.patch("h3_budget.read_live_usage",
+                        return_value={"balance": 160.0, "rate": 0.0}):
             result = h3_controller.stop_and_verify_session("muse-h3-abc123")
             self.assertTrue(result["stopped_confirmed"])
             self.assertIn(["stop", "-s", "muse-h3-abc123"], calls)
@@ -477,7 +470,8 @@ class ProductionTest(unittest.TestCase):
             wd.save_managed_sessions([{"session_id": "muse-h3-abc123", "gpu": "G4", "run_id": "r1",
                                        "started_at_utc": "2026-11-11T00:00:00+00:00",
                                        "deadline_utc": "2026-11-11T02:00:00+00:00", "status": "active"}], path=p)
-            with mock.patch.object(wd, "session_still_active", return_value=True):
+            with mock.patch.object(wd, "query_session_state",
+                                   return_value=wd.SessionState.ACTIVE):
                 rec = wd.reconcile_on_startup(path=p)
                 self.assertIn("muse-h3-abc123", rec["managed_active_sessions"])
 

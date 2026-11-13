@@ -413,8 +413,8 @@
     },
     {
       "path": "docs/module_inventory.md",
-      "size_bytes": 30846,
-      "sha256": "4e8f32db2a38e581a51f98173d26559bacf3567889fbed5313a5eb0a0836ab60",
+      "size_bytes": 31154,
+      "sha256": "19a6e374098a8d04dac2ab9db7c021494a1a171d8a7d602a807b08784187af53",
       "role": "Module inventory (this table's source of truth for hashes)"
     },
     {
@@ -545,8 +545,8 @@
     },
     {
       "path": "h3_controller.py",
-      "size_bytes": 66136,
-      "sha256": "1955c69156409e7702f3d3c697283b0c4616720f1af94767448e07462aa8d8ea",
+      "size_bytes": 67372,
+      "sha256": "393f5574333df97ef083e3057bb65363c3171d69382aa8f4de75ec025e94d3bb",
       "role": "Run orchestration: preflight, allocation, mount, worker exec, download, stop"
     },
     {
@@ -605,8 +605,8 @@
     },
     {
       "path": "h3_session_watchdog.py",
-      "size_bytes": 13875,
-      "sha256": "df3f2b7bd869220b25b1ae0a888d268a766948ba41ba5da1d5096de60e5308b4",
+      "size_bytes": 19317,
+      "sha256": "47adff02e017eb5f438f486849d72720e790bdf56695070201d0dd81f7f600b8",
       "role": "Managed-session registry, deadline watchdog, stop + reconcile"
     },
     {
@@ -857,14 +857,14 @@
     },
     {
       "path": "tests/test_h3_mount_repair.py",
-      "size_bytes": 24057,
-      "sha256": "8050d2977411b0bfe8b5646f96e71991e30c3d0e78ae6f3198b61f5931b31ab8",
+      "size_bytes": 24371,
+      "sha256": "8f9d718ff19fe7da9760e48a159918ebed362b4dea8199031495ecc17f1dd289",
       "role": "Tests: mount repair, CLI patches, budget/watchdog/restore gates (31 tests)"
     },
     {
       "path": "tests/test_h3_production.py",
-      "size_bytes": 42074,
-      "sha256": "6f21e909f06979c97c37a91f5d2a8f6a8003c5e72d7b2186728b90220fe90bd1",
+      "size_bytes": 41899,
+      "sha256": "d131efb969230b38eaf02016032fbba1c9d8c4ffe18c14ac1ebc15b0c60e8969",
       "role": "Tests: production flow incl. worker marker, stop, parsers (63 tests)"
     },
     {
@@ -880,6 +880,12 @@
       "role": "NEW regression tests: find_rendered_video history shapes (8 tests)"
     },
     {
+      "path": "tests/test_session_state_tristate.py",
+      "size_bytes": 12490,
+      "sha256": "6e689f8e53c95c88ae239a191c7c7eeb958c18910cd2c025473241b6b8f138c8",
+      "role": "Tests"
+    },
+    {
       "path": "tests/test_task_budget.py",
       "size_bytes": 9259,
       "sha256": "3b93a129f249659e9a2176b4481390ec3e168278f24503edddb38a79df9c540c",
@@ -887,8 +893,8 @@
     },
     {
       "path": "tests/test_watchdog_fail_closed.py",
-      "size_bytes": 9318,
-      "sha256": "e1c5910d2613426e7490dbf7275cecaa37ee25d76b757c3257504ca294517f50",
+      "size_bytes": 9455,
+      "sha256": "afdac1778a0be42b8dcc63ab48d175350737813b23a9520e395ffae430642397",
       "role": "Tests"
     },
     {

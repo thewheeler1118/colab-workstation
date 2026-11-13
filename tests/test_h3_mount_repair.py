@@ -332,19 +332,22 @@ class VmRestartAndCleanupTest(unittest.TestCase):
             state = Path(d) / "sessions.json"
             deadline = _iso(BASE + datetime.timedelta(hours=1))
             record_session("muse-h3-abc1234", "G4", "run-x", deadline, path=state)
-            fake = mock.Mock(stdout="muse-h3-abc1234\n", stderr="")
+            # Mock at the _run_colab level so the real strict parser runs:
+            # the session line must be the canonical 0.7.5 format.
+            fake = mock.Mock(returncode=0,
+                             stdout="[muse-h3-abc1234] gpu-g4-xyz | Hardware: G4\n", stderr="")
             with mock.patch("h3_session_watchdog._run_colab", return_value=fake):
                 rec = reconcile_on_startup("adc", path=state)
             self.assertEqual(rec["managed_active_sessions"], ["muse-h3-abc1234"])
-            gone = mock.Mock(stdout="No active sessions\n", stderr="")
+            gone = mock.Mock(returncode=0, stdout="No active sessions\n", stderr="")
             with mock.patch("h3_session_watchdog._run_colab", return_value=gone):
                 rec = reconcile_on_startup("adc", path=state)
             self.assertEqual(rec["managed_active_sessions"], [])
 
     def test_session_cleanup_verified(self):
-        with mock.patch("h3_controller.inspect", side_effect=[
-                {"sessions": [{"name": "muse-h3-abc1234"}]},
-                {"sessions": []}]), \
+        from h3_session_watchdog import SessionState
+        with mock.patch("h3_session_watchdog.query_session_state",
+                        side_effect=[SessionState.ACTIVE, SessionState.STOPPED]), \
              mock.patch("h3_controller.run_cli", return_value={}), \
              mock.patch("h3_controller.record"), \
              mock.patch("time.sleep"):
@@ -352,8 +355,9 @@ class VmRestartAndCleanupTest(unittest.TestCase):
         self.assertTrue(result["stopped_confirmed"])
 
     def test_session_cleanup_orphan_risk_recorded(self):
-        present = {"sessions": [{"name": "muse-h3-abc1234"}]}
-        with mock.patch("h3_controller.inspect", return_value=present), \
+        from h3_session_watchdog import SessionState
+        with mock.patch("h3_session_watchdog.query_session_state",
+                        return_value=SessionState.ACTIVE), \
              mock.patch("h3_controller.run_cli", return_value={}), \
              mock.patch("h3_controller.record") as record_mock, \
              mock.patch("time.sleep"):
