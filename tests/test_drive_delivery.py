@@ -280,8 +280,9 @@ class RunVariantDeliveryTest(unittest.TestCase):
         # Stop + deliver mocks with an ordered call log.
         self.mocks["stop"] = self._po(
             hc, "stop_and_verify_session", side_effect=self._fake_stop)
+        # TASK-005 §5: run_variant now delivers via the idempotent wrapper.
         self.mocks["deliver"] = self._po(
-            hc, "deliver_variant_to_drive", side_effect=self._fake_deliver)
+            hc, "deliver_variant_to_drive_idempotent", side_effect=self._fake_deliver)
 
     def _fake_stop(self, session):
         self.calls.append(("stop", session))
@@ -333,6 +334,9 @@ class RunVariantDeliveryTest(unittest.TestCase):
         self.assertEqual(manifest["last_verified_stage"], "DRIVE_VERIFIED")
         self.assertEqual(manifest["artifacts"]["drive_file_id"], "drive-file-1")
         self.assertEqual(manifest["artifacts"]["local_sha256"], self.sha)
+        # TASK-005 §5: the tail's DRIVE_VERIFIED update (real code) records
+        # DELIVERED even though the deliver call itself is mocked.
+        self.assertEqual(manifest["artifacts"]["delivery_state"], "DELIVERED")
         self.assertEqual(manifest["recovery_generation"], 0)
         stages = [e["detail"].get("to") for e in audit
                   if e["event"] == "STAGE"]
@@ -355,7 +359,9 @@ class RunVariantDeliveryTest(unittest.TestCase):
         # Use the REAL deliver helper with a failing archive function:
         # the run must surface the archive-only error and keep the MP4.
         # Stop only the deliver patch (leave every other mock in place).
-        deliver_patch = self.patchers["deliver_variant_to_drive"]
+        # TASK-005 §5: the patch target is now the idempotent wrapper;
+        # the real wrapper falls through to the real deliver below.
+        deliver_patch = self.patchers["deliver_variant_to_drive_idempotent"]
         deliver_patch.stop()
         self.patches.remove(deliver_patch)
         archive = self._po(
@@ -371,6 +377,9 @@ class RunVariantDeliveryTest(unittest.TestCase):
         manifest, _audit = self._manifest()
         self.assertEqual(manifest["task_state"], "COMPLETED_AWAITING_ARCHIVE")
         self.assertEqual(manifest["session_state"], "STOPPED")
+        # TASK-005 §5: the real deliver recorded the upload attempt.
+        self.assertEqual(manifest["artifacts"]["delivery_state"],
+                         "DURABLE_UPLOAD_STARTED")
 
     def test_watchdog_failure_still_stops_managed_gpu(self):
         self.mocks["watchdog"].side_effect = RuntimeError(
@@ -428,7 +437,7 @@ class ArchiveActionTest(unittest.TestCase):
         validate = vp.start()
         self.patches.append(vp)
         dp = mock.patch.object(
-            hc, "deliver_variant_to_drive",
+            hc, "deliver_variant_to_drive_idempotent",
             return_value={"state": "DELIVERY_COMPLETED",
                           "drive_file_id": "drive-file-1"})
         deliver = dp.start()

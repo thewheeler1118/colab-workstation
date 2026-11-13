@@ -47,7 +47,8 @@ def _state(run_id=RUN_ID, variant="A", stage="VIDEO_READY", output=None, error=N
 
 
 def _video_info(sha):
-    return {"sha256": sha, "frame_count": 274, "path": "A.mp4", "size": 1234}
+    return {"sha256": sha, "frame_count": 274, "width": 1080,
+            "height": 1920, "fps": 24, "path": "A.mp4", "size": 1234}
 
 
 class JobStateTest(unittest.TestCase):
@@ -329,7 +330,9 @@ class _ResumeBase(unittest.TestCase):
     def _local_mp4(self):
         mp4 = self.out_root / RUN_ID / "A.mp4"
         mp4.parent.mkdir(parents=True, exist_ok=True)
-        mp4.write_bytes(b"fake-validated-mp4-bytes" * 100)
+        # Bytes must hash to self.sha: the idempotent deliver re-proves
+        # the local file against video_info (TASK-005 §5).
+        mp4.write_bytes(b"fake-mp4")
         return mp4
 
 
@@ -467,8 +470,15 @@ class ResumeLiveSessionTest(_ResumeBase):
                  return_value={"cu_balance": 145.0, "rate": 5.0, "sessions": []})
         self.stop_mock = self._po(hc, "stop_and_verify_session",
                                   return_value={"session": SESSION, "stopped_confirmed": True})
-        self._po(hc, "download_and_validate_variant",
-                 return_value=_video_info(self.sha))
+        # The mocked download writes the file it claims to have fetched:
+        # the idempotent deliver re-proves the local file (TASK-005 §5).
+        def _fake_download(session, variant, run_id):
+            mp4 = self.out_root / run_id / f"{variant}.mp4"
+            mp4.parent.mkdir(parents=True, exist_ok=True)
+            mp4.write_bytes(b"fake-mp4")
+            return _video_info(self.sha)
+
+        self._po(hc, "download_and_validate_variant", side_effect=_fake_download)
         self._po(hc, "deliver_variant_to_drive",
                  return_value={"state": "DELIVERY_COMPLETED", "variant": "A",
                                "run_id": RUN_ID, "drive_file_id": "drive-file-3"})
