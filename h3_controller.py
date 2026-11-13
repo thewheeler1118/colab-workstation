@@ -55,11 +55,13 @@ from h3_mount_timeline import (
 from h3_contract import (
     validate_model_cache_manifest,
     validate_poster,
+    MODEL_HF_REVISION,
     POSTER_SHA256,
     POSTER_DRIVE_ID,
     STORY_DRIVE_ID,
 )
 from auth_support import resolve_colab_executable, audit_user_adc_file
+from h3_environment import verify_environment
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "reference_v2"))
@@ -498,6 +500,17 @@ def preflight(args) -> dict:
 
     check("cli_drivemount_timeout_patch", _cli_drivemount_patch)
 
+    def _environment_contract():
+        # TASK-005 §6 (Issue #29): the full environment gate — CLI
+        # version + client hash + both patches + ffmpeg/ffprobe + the
+        # allowed Python list — against the checked-in manifest. The two
+        # patch checks above stay as granular diagnostics.
+        from h3_environment import verify_environment
+
+        return verify_environment()
+
+    check("environment_contract", _environment_contract)
+
     def _pty():
         # sys.executable, not bare `python`: the check must pass in any launch
         # environment (the exec sandbox has python3 but no `python` alias).
@@ -667,7 +680,7 @@ def archive_variant_to_drive(variant: str, run_id: str, qa_files: list | None = 
         if not local_path.is_file():
             raise RuntimeError(f"Archive file missing: {local_path}")
         sha = sha256_file(local_path)
-        entry = upload_one(service, local_path, run_folder, name, name, sha, "54472221d27c695fca9621b0c3ed52f06c4af707")
+        entry = upload_one(service, local_path, run_folder, name, name, sha, MODEL_HF_REVISION)
         meta = get_file_evidence(service, entry["drive_file_id"])
         if not check_archive_metadata(meta, run_folder):
             raise RuntimeError(f"Drive archive parent/trash check failed for {name}")
@@ -1297,6 +1310,11 @@ def _resume_run(args) -> dict:
     deliverable, and never create a 30 CU ledger."""
     from h3_run_manifest import resume_run
 
+    # Environment contract (TASK-005 §6): resume drives the same CLI
+    # (queries, polls, and — for the stop — an empty POST that needs the
+    # patched client), so the gate runs before any side effect, including
+    # the recovery-generation bump.
+    verify_environment()
     run_id = args.run_id
     view = resume_run(ROOT, run_id)
     manifest = view["manifest"]
@@ -1420,6 +1438,10 @@ def _stop_run(args) -> dict:
 
     if not args.run_id:
         raise ValueError("--run-id is required for stop")
+    # Environment contract (TASK-005 §6): the stop path issues an empty
+    # POST (unassign) that needs the patched CLI; gate before touching
+    # any session.
+    verify_environment()
     manifest = load_run_manifest(ROOT, args.run_id)
     session_id = manifest.get("session_id")
     if not session_id:
@@ -1516,6 +1538,12 @@ def run_variant(args) -> dict:
     # Durable run manifest (TASK-005 §4.1): the task is authorised here,
     # so the persistent record starts now and survives a controller restart.
     _manifest_create(args, ledger)
+    # Environment contract (TASK-005 §6, Issue #29): the pinned CLI
+    # (0.7.5 + both production patches), ffmpeg/ffprobe and the allowed
+    # Python versions must match the checked-in manifest BEFORE any live
+    # session interaction or allocation. Nothing is allocated yet, so a
+    # mismatch here is a clean refusal, not an orphan.
+    verify_environment()
     pre = inspect()
     if pre["cu_balance"] is None:
         raise RuntimeError("Cannot parse CU balance; abort")

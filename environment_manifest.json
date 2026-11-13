@@ -1,0 +1,29 @@
+{
+  "generator_version": 1,
+  "cli_version": "0.7.5",
+  "cli_executable": "/home/hatch/workspace/task005-work/.venv-colab-cli/bin/colab",
+  "cli_client_sha256": "0bf6e4fc5c6ff3cadf64d1867fcdcdaac8d7bcf131c34e8a8c4f9c8e0b53424f",
+  "cli_pristine_client_sha256": "7081d2c9decbc9a4cafb4ab89202c7e7a644f72bd74a7e846bffce5344839a06",
+  "cli_wheel_sha256": null,
+  "cli_wheel_note": "No wheel file is kept on this VM; the pin is enforced by version + installed client hash + both patch markers, not by a wheel hash.",
+  "cli_post_body_patch": true,
+  "cli_drivemount_timeout_patch": true,
+  "python_major_minor": "3.12",
+  "python_major_minor_allowed": [
+    "3.11",
+    "3.12"
+  ],
+  "python_version": "3.12.3",
+  "ffmpeg_present": true,
+  "ffmpeg_version": "ffmpeg version 8.1.2 Copyright (c) 2000-2026 the FFmpeg developers",
+  "ffprobe_present": true,
+  "ffprobe_version": "ffprobe version 8.1.2 Copyright (c) 2007-2026 the FFmpeg developers",
+  "drive_transport": {
+    "transport": "httplib2",
+    "status": "KNOWN_BROKEN_ON_THIS_VM",
+    "fix": "PR-7 (Issue #30): switch drive_service() to a requests-based transport"
+  },
+  "comfyui_commit": "61e524bdba7a4e193b45c2697f1af83c1beb86d6",
+  "model_hf_revision": "54472221d27c695fca9621b0c3ed52f06c4af707",
+  "workflow_sha256": "7f6dab9f1eff0a9e73808e5cefb909be4cc0099816f3db05ade5245a9bf993f3"
+}

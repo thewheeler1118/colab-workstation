@@ -215,6 +215,11 @@ class RunVariantDeliveryTest(unittest.TestCase):
         self._po(hc.time, "sleep", lambda s: None)
         self._po(hc, "validate_local")
         self._po(hc, "validate_comfy_workflow", return_value={})
+        # TASK-005 §6: the environment gate runs before allocation; the
+        # mock lets the delivery wiring tests proceed (a dedicated test
+        # below proves the gate blocks allocation when it fails).
+        self.mocks["env"] = self._po(hc, "verify_environment",
+                                      return_value={"ok": True, "checked": []})
         self._po(hc, "initialize_project_budget",
                  return_value={"max_observed_spent_cu": 0.0,
                                "production_task_id": "h3-ab-20261111"})
@@ -223,7 +228,7 @@ class RunVariantDeliveryTest(unittest.TestCase):
         self._po(hc, "ensure_no_foreign_sessions")
         self._po(hc, "run_cli", return_value={"returncode": 0})
         self._po(hc, "choose_gpu_candidate", return_value={"key": "G4"})
-        self._po(hc, "allocate_managed_session", return_value=SESSION)
+        self.mocks["allocate"] = self._po(hc, "allocate_managed_session", return_value=SESSION)
         self._po(hc, "probe_actual_gpu", return_value={"gpu": "G4"})
         self._po(hc, "reconcile_budget",
                  side_effect=lambda ledger, bal, path: ledger)
@@ -405,6 +410,20 @@ class RunVariantDeliveryTest(unittest.TestCase):
         self.assertEqual(self._deliver_calls(), [])
         manifest, _audit = self._manifest()
         self.assertEqual(manifest["task_state"], "FAILED")
+
+    def test_environment_gate_blocks_allocation(self):
+        # TASK-005 §6: a failing environment gate refuses before any
+        # allocation — no GPU, no session, no manifest beyond the
+        # authorization record.
+        from h3_environment import EnvironmentMismatch
+
+        self.mocks["env"].side_effect = EnvironmentMismatch(
+            "Environment mismatch on cli_version: expected '0.7.5', got '0.7.4'")
+        with self.assertRaisesRegex(EnvironmentMismatch, "cli_version"):
+            hc.run_variant(_args())
+        self.mocks["allocate"].assert_not_called()
+        self.assertEqual(self._stop_calls(), [])
+        self.assertEqual(self._deliver_calls(), [])
 
 
 class ArchiveActionTest(unittest.TestCase):

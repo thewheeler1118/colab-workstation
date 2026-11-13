@@ -61,6 +61,10 @@ class _DeliverBase(unittest.TestCase):
             mock.patch.object(hc, "OUTPUT_ROOT", self.out_root),
             mock.patch.object(hc, "record", lambda data: None),
             mock.patch.object(hc.time, "sleep", lambda s: None),
+            # TASK-005 §6: resume drives the same CLI, so the environment
+            # gate runs first; the mock lets the delivery tests proceed.
+            mock.patch.object(hc, "verify_environment",
+                              return_value={"ok": True, "checked": []}),
         ]
         for p in self.patches:
             p.start()
