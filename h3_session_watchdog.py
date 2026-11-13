@@ -19,6 +19,7 @@ Never substitute a remote `kill -9` for a real GPU session stop.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
 import json
 import os
@@ -28,6 +29,11 @@ import sys
 import tempfile
 import time
 from enum import Enum
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX platforms have no flock
+    fcntl = None
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -58,6 +64,65 @@ def _atomic_write_json(path: Path, data) -> None:
             os.unlink(tmp_name)
 
 
+# TASK-006 P0-A (Issue #42): the controller and the watchdog both mutate
+# the same managed-session file. An atomic file replace alone does not
+# make load-modify-save atomic across processes — two writers can load
+# the same content and the last save silently drops the other's update.
+# Every mutation below therefore holds this exclusive lock across the
+# whole load-modify-save, on a `<path>.lock` sidecar.
+_STATE_LOCK_TIMEOUT_SEC = 10.0
+
+
+@contextlib.contextmanager
+def _state_lock(path: Path):
+    """Exclusive lock for one managed-session file. Bounded wait; raises
+    TimeoutError instead of hanging forever. On platforms without fcntl
+    the lock is a no-op (documented; the production VM and CI are POSIX)."""
+    if fcntl is None:  # pragma: no cover - non-POSIX
+        yield
+        return
+    lock_path = Path(str(path) + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    deadline = time.monotonic() + _STATE_LOCK_TIMEOUT_SEC
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"timed out waiting for the managed-session lock {lock_path}")
+                time.sleep(0.05)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def _mutate_session(session_id: str, path: Path, mutate) -> tuple[dict | None, bool]:
+    """Load-modify-save one managed record under the state lock. `mutate`
+    receives the record dict and returns True when it changed it. A change
+    bumps the record's `version` by exactly one and refreshes
+    `last_updated_at_utc`. Returns (record, changed): record is None when
+    no such record exists; changed is False when the record was found but
+    `mutate` declined to change it."""
+    with _state_lock(path):
+        sessions = load_managed_sessions(path)
+        for s in sessions:
+            if s.get("session_id") == session_id:
+                if not mutate(s):
+                    return s, False
+                s["version"] = int(s.get("version") or 0) + 1
+                s["last_updated_at_utc"] = _utc_now()
+                save_managed_sessions(sessions, path)
+                return s, True
+    return None, False
+
+
 def load_managed_sessions(path: Path = STATE_PATH) -> list:
     if not Path(path).exists():
         return []
@@ -73,29 +138,55 @@ def save_managed_sessions(sessions: list, path: Path = STATE_PATH) -> None:
 
 def record_session(session_id: str, gpu: str, run_id: str, deadline_utc: str, path: Path = STATE_PATH,
                    production_task_id: str = "") -> dict:
-    sessions = load_managed_sessions(path)
-    sessions = [s for s in sessions if s.get("session_id") != session_id]
-    rec = {
-        "session_id": session_id,
-        "gpu": gpu,
-        "run_id": run_id,
-        "production_task_id": production_task_id,
-        "started_at_utc": _utc_now(),
-        "deadline_utc": deadline_utc,
-        "status": "active",
-    }
-    sessions.append(rec)
-    save_managed_sessions(sessions, path)
+    # Under the state lock: re-recording an existing id replaces the old
+    # record but carries its version forward (+1), so versions stay
+    # monotonic across re-records.
+    with _state_lock(path):
+        sessions = load_managed_sessions(path)
+        old = next((s for s in sessions if s.get("session_id") == session_id), None)
+        sessions = [s for s in sessions if s.get("session_id") != session_id]
+        rec = {
+            "session_id": session_id,
+            "gpu": gpu,
+            "run_id": run_id,
+            "production_task_id": production_task_id,
+            "started_at_utc": _utc_now(),
+            "deadline_utc": deadline_utc,
+            "status": "active",
+            "version": (int(old.get("version") or 0) + 1) if old else 1,
+            "last_updated_at_utc": _utc_now(),
+        }
+        sessions.append(rec)
+        save_managed_sessions(sessions, path)
     return rec
 
 
-def mark_session_stopped(session_id: str, path: Path = STATE_PATH) -> None:
-    sessions = load_managed_sessions(path)
-    for s in sessions:
-        if s.get("session_id") == session_id:
-            s["status"] = "stopped"
-            s["stopped_at_utc"] = _utc_now()
-    save_managed_sessions(sessions, path)
+def mark_session_stopped(session_id: str, confirmed_state, path: Path = STATE_PATH) -> bool:
+    """Mark a managed record stopped — ONLY on a confirmed STOPPED verdict
+    from a real session query (TASK-006 P0-A, Issue #42).
+    `confirmed_state` must be SessionState.STOPPED or the string
+    "STOPPED"; anything else raises ValueError, so no caller can mark a
+    record stopped on an ACTIVE / UNKNOWN / unverified verdict. The old
+    unconditional call (mark after any stop attempt) is what let a still
+    billing GPU disappear from the managed file.
+    Returns True when the record was found (and is now stopped), False
+    when no such record exists. Marking an already-stopped record is a
+    no-op that returns True."""
+    state_value = confirmed_state.value if isinstance(confirmed_state, SessionState) else str(confirmed_state)
+    if state_value != SessionState.STOPPED.value:
+        raise ValueError(
+            f"mark_session_stopped requires a confirmed STOPPED state, got {state_value!r}; "
+            "refusing to mark the session stopped")
+
+    def _mark(s: dict) -> bool:
+        if s.get("status") == "stopped":
+            return False
+        s["status"] = "stopped"
+        s["stopped_at_utc"] = _utc_now()
+        return True
+
+    rec, _changed = _mutate_session(session_id, path, _mark)
+    return rec is not None
 
 
 def update_session_deadline(session_id: str, deadline_utc: str, path: Path = STATE_PATH) -> dict | None:
@@ -103,16 +194,17 @@ def update_session_deadline(session_id: str, deadline_utc: str, path: Path = STA
     probe, when the controller knows the actual live rate and the
     budget-derived wall time). The running watch process re-reads the
     record on every poll, so the new deadline takes effect without a
-    restart. Returns the updated record, or None if not found."""
-    sessions = load_managed_sessions(path)
-    updated = None
-    for s in sessions:
-        if s.get("session_id") == session_id:
-            s["deadline_utc"] = deadline_utc
-            s["deadline_updated_at_utc"] = _utc_now()
-            updated = s
-    save_managed_sessions(sessions, path)
-    return updated
+    restart. Returns the updated record, or None if not found or no
+    longer active — a stopped record's deadline is never rewritten."""
+    def _update(s: dict) -> bool:
+        if s.get("status") != "active":
+            return False
+        s["deadline_utc"] = deadline_utc
+        s["deadline_updated_at_utc"] = _utc_now()
+        return True
+
+    rec, changed = _mutate_session(session_id, path, _update)
+    return rec if changed else None
 
 
 def should_stop(record: dict, live_balance_cu, ledger: dict | None, now: datetime.datetime | None = None,
@@ -331,15 +423,26 @@ def stop_managed_session(session_id: str, colab_auth: str = "adc",
 
 
 def reconcile_on_startup(colab_auth: str = "adc", path: Path = STATE_PATH) -> dict:
-    """Called before any new GPU allocation: report managed sessions that
-    are still active. Never auto-stop a session that is not in our file.
-    Each active session is reported with its run/task/deadline and a
-    best-effort unbilled-cost estimate (None when the live rate cannot be
-    read — the cost is then unconfirmable, but the session still blocks).
+    """Called before any new GPU allocation: verify EVERY managed record
+    against the real session state. Never auto-stop a session that is not
+    in our file. Each active session is reported with its run/task/deadline
+    and a best-effort unbilled-cost estimate (None when the live rate cannot
+    be read — the cost is then unconfirmable, but the session still blocks).
     A session whose state cannot be confirmed (UNKNOWN) raises
     SessionQueryError: an unconfirmable session state must fail closed,
-    never silently allow a parallel GPU."""
-    sessions = [s for s in load_managed_sessions(path) if s.get("status") == "active"]
+    never silently allow a parallel GPU.
+
+    TASK-006 P0-A (Issue #42): the managed file is checked against live
+    reality in both directions, because the old unconditional mark could
+    leave either mismatch behind:
+    - record `stopped` but session still ACTIVE: a contradiction. Raises
+      SessionQueryError and blocks allocation — the GPU may still be
+      billing and must be stopped explicitly, never ignored.
+    - record `active` but session already STOPPED: repaired by marking
+      stopped, the live query being the proof; reported in
+      `repaired_stale_active` (this is the mismatch the old resume paths
+      left behind by never marking at all)."""
+    sessions = load_managed_sessions(path)
     rate = None
     try:
         from h3_budget import read_live_usage
@@ -350,31 +453,43 @@ def reconcile_on_startup(colab_auth: str = "adc", path: Path = STATE_PATH) -> di
         rate = None
     still = []
     detail = []
+    repaired = []
     for s in sessions:
         state = query_session_state(s["session_id"], colab_auth=colab_auth)
         if state is SessionState.UNKNOWN:
             raise SessionQueryError(
                 f"cannot confirm state of managed session {s['session_id']} "
                 f"(run {s.get('run_id')}); failing closed: refusing to allocate a new GPU")
-        if state is SessionState.ACTIVE:
-            still.append(s["session_id"])
-            est = None
-            if rate is not None:
-                try:
-                    from h3_budget import estimate_unbilled_cu
+        if s.get("status") == "stopped":
+            if state is SessionState.ACTIVE:
+                raise SessionQueryError(
+                    f"managed record for {s['session_id']} (run {s.get('run_id')}) says stopped "
+                    "but the session is still ACTIVE; failing closed: refusing to allocate a "
+                    "new GPU — stop that session explicitly first")
+            continue
+        if state is SessionState.STOPPED:
+            mark_session_stopped(s["session_id"], SessionState.STOPPED, path=path)
+            repaired.append(s["session_id"])
+            continue
+        still.append(s["session_id"])
+        est = None
+        if rate is not None:
+            try:
+                from h3_budget import estimate_unbilled_cu
 
-                    est = estimate_unbilled_cu(s.get("started_at_utc"), rate)
-                except Exception:  # noqa: BLE001 - estimate is best-effort only
-                    est = None
-            detail.append({
-                "session_id": s["session_id"],
-                "run_id": s.get("run_id"),
-                "production_task_id": s.get("production_task_id"),
-                "deadline_utc": s.get("deadline_utc"),
-                "started_at_utc": s.get("started_at_utc"),
-                "unbilled_estimate_cu": est,
-            })
+                est = estimate_unbilled_cu(s.get("started_at_utc"), rate)
+            except Exception:  # noqa: BLE001 - estimate is best-effort only
+                est = None
+        detail.append({
+            "session_id": s["session_id"],
+            "run_id": s.get("run_id"),
+            "production_task_id": s.get("production_task_id"),
+            "deadline_utc": s.get("deadline_utc"),
+            "started_at_utc": s.get("started_at_utc"),
+            "unbilled_estimate_cu": est,
+        })
     return {"managed_active_sessions": still, "managed_active_detail": detail,
+            "repaired_stale_active": repaired,
             "checked_at_utc": _utc_now()}
 
 
@@ -441,7 +556,7 @@ def watch(session_id: str, colab_auth: str = "adc", poll_sec: int = 60,
             return 0
         state = query_session_state(session_id, colab_auth=colab_auth)
         if state is SessionState.STOPPED:
-            mark_session_stopped(session_id)
+            mark_session_stopped(session_id, SessionState.STOPPED)
             print(f"watchdog: {session_id} already gone")
             return 0
         if state is SessionState.UNKNOWN:
@@ -463,7 +578,7 @@ def watch(session_id: str, colab_auth: str = "adc", poll_sec: int = 60,
             print(f"watchdog: stopping {session_id}: {reason}", flush=True)
             result = stop_managed_session(session_id, colab_auth=colab_auth)
             if result["state"] == "STOPPED":
-                mark_session_stopped(session_id)
+                mark_session_stopped(session_id, SessionState.STOPPED)
                 return 0
             print(f"watchdog: CRITICAL could not confirm stop of {session_id}: "
                   f"{json.dumps(result, ensure_ascii=False)}", file=sys.stderr)
@@ -507,7 +622,7 @@ def main() -> int:
     if a.cmd == "stop":
         result = stop_managed_session(a.session, a.colab_auth)
         if result["state"] == "STOPPED":
-            mark_session_stopped(a.session)
+            mark_session_stopped(a.session, SessionState.STOPPED)
         print(json.dumps(result, indent=2))
         return 0 if result["state"] == "STOPPED" else 1
     return 1

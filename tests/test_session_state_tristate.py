@@ -159,7 +159,7 @@ class WatchUnknownTest(unittest.TestCase):
                                return_value="/usr/bin/colab"):
                 rc = watch(SID, production_task_id="h3-ab-20261112", poll_sec=0.01)
             self.assertEqual(rc, 0)
-            marked.assert_called_once_with(SID)
+            marked.assert_called_once_with(SID, SessionState.STOPPED)
 
     def test_watch_unknown_at_deadline_escalates_without_marking(self):
         # Deadline already past + state UNKNOWN: the watch must attempt
@@ -230,11 +230,13 @@ class ControllerStopTest(unittest.TestCase):
         with mock.patch("h3_session_watchdog.query_session_state",
                         return_value=SessionState.STOPPED), \
                 mock.patch.object(hc, "run_cli") as run_cli, \
-                mock.patch.object(hc, "record"):
+                mock.patch.object(hc, "record"), \
+                mock.patch("h3_session_watchdog.mark_session_stopped") as marked:
             out = hc.stop_and_verify_session(SID)
         self.assertTrue(out["stopped_confirmed"])
         self.assertEqual(out["state"], "STOPPED")
         run_cli.assert_not_called()
+        marked.assert_called_once_with(SID, SessionState.STOPPED)
 
     def test_active_then_stopped(self):
         with mock.patch("h3_session_watchdog.query_session_state",
@@ -244,6 +246,7 @@ class ControllerStopTest(unittest.TestCase):
                 mock.patch.object(hc, "record") as rec, \
                 mock.patch("h3_budget.read_live_usage",
                           return_value={"balance": 144.0, "rate": 0.0}), \
+                mock.patch("h3_session_watchdog.mark_session_stopped") as marked, \
                 mock.patch("time.sleep"):
             out = hc.stop_and_verify_session(SID)
         self.assertTrue(out["stopped_confirmed"])
@@ -251,17 +254,20 @@ class ControllerStopTest(unittest.TestCase):
         run_cli.assert_called_once_with(["stop", "-s", SID], timeout=65)
         events = [c.args[0]["event"] for c in rec.call_args_list]
         self.assertIn("stopped", events)
+        marked.assert_called_once_with(SID, SessionState.STOPPED)
 
     def test_unknown_never_confirms(self):
         with mock.patch("h3_session_watchdog.query_session_state",
                         return_value=SessionState.UNKNOWN), \
                 mock.patch.object(hc, "run_cli") as run_cli, \
                 mock.patch.object(hc, "record") as rec, \
+                mock.patch("h3_session_watchdog.mark_session_stopped") as marked, \
                 mock.patch("time.sleep"):
             out = hc.stop_and_verify_session(SID)
         self.assertFalse(out["stopped_confirmed"])
         self.assertEqual(out["state"], "UNKNOWN")
         run_cli.assert_not_called()
+        marked.assert_not_called()
         events = [c.args[0]["event"] for c in rec.call_args_list]
         self.assertIn("CRITICAL_ORPHAN_RISK", events)
         self.assertEqual(events.count("stop_error"), 3)
@@ -272,10 +278,12 @@ class ControllerStopTest(unittest.TestCase):
                 mock.patch.object(hc, "run_cli",
                                   return_value={"returncode": 0}), \
                 mock.patch.object(hc, "record") as rec, \
+                mock.patch("h3_session_watchdog.mark_session_stopped") as marked, \
                 mock.patch("time.sleep"):
             out = hc.stop_and_verify_session(SID)
         self.assertFalse(out["stopped_confirmed"])
         self.assertEqual(out["state"], "ACTIVE")
+        marked.assert_not_called()
         events = [c.args[0]["event"] for c in rec.call_args_list]
         self.assertIn("CRITICAL_ORPHAN_RISK", events)
 

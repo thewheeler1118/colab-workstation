@@ -55,7 +55,7 @@ from h3_controller import (
     stop_and_verify_session,
     create_run_id,
 )
-from h3_session_watchdog import reconcile_on_startup, record_session, mark_session_stopped
+from h3_session_watchdog import reconcile_on_startup, record_session
 from h3_remote_worker import estimate_restore
 
 TOTAL_MODEL_BYTES = 40_073_842_159
@@ -143,6 +143,7 @@ def main() -> int:
     created = False
     allocation_attempted = False
     stop_ok = False
+    watchdog_proc = None
     gpu_info = None
     chosen_key = None
     attempts = []
@@ -206,83 +207,86 @@ def main() -> int:
             )
         except Exception as e:  # noqa: BLE001
             record({"event": "watchdog_start_failed", "session": session, "error": str(e)[:300]})
-        try:
-            gpu_info = probe_actual_gpu(session, chosen_key)
-            record({"event": "gpu_probed", "session": session, **gpu_info})
-            live = inspect()
-            if live["rate"] is None or live["rate"] <= 0 or live["rate"] > args.max_rate_cu_h:
-                raise RuntimeError("Unknown/excessive live CU/hr rate")
-            ledger = reconcile_budget(ledger, live["cu_balance"], LEDGER_PATH)
-            unbilled = estimate_unbilled_cu(session_rec.get("started_at_utc"), live["rate"])
-            record({"event": "unbilled_estimate", "session": session, "unbilled_cu": unbilled,
-                    "rate_cu_h": live["rate"], "posted_balance_cu": live["cu_balance"]})
-            budget_sec = allowed_runtime_seconds(live["rate"], live["cu_balance"], ledger,
-                                                 session_spent_cu=unbilled, unbilled_cu=unbilled)
-            budget_sec = min(budget_sec, args.max_wall_sec)
-            if budget_sec < 300:
-                raise RuntimeError("Budget cannot cover minimal task + cleanup reserve")
-            # Step 3: remote signature probe FIRST. No timeout_ms -> stop immediately.
-            sig = exec_script(session, ROOT / "h3_mount_signature_probe.py", timeout=120)
-            result["signature_output"] = (sig["stdout"] + "\n" + sig["stderr"]).strip()[-500:]
-            if not check_mount_signature(sig):
-                raise RuntimeError("Remote drive.mount does not accept timeout_ms; abort before drivemount")
-            result["signature_supported"] = True
-            # Step 4: official interactive Drive mount (patched remote timeout 600s).
-            timeline = mount_drive(session, deadline_sec=budget_sec, run_id=args.run_id,
-                                   timeline_path=run_dir / "mount_timeline.json")
-            result["timeline"] = timeline
-            result["mount_success"] = timeline.get("outcome") == "mounted"
-            if not result["mount_success"]:
-                raise RuntimeError(f"Drive mount failed: outcome={timeline.get('outcome')} error={timeline.get('error')}")
-            # Step 5: drive probe — four weights must be visible (returncode 0 is not enough).
-            exec_script(session, ROOT / "h3_init_remote.py", timeout=60)
-            mount_cfg = RUNS / f"mount_{session}.json"
-            mount_cfg.write_text(json.dumps({"drive_cache_dir": args.drive_cache_dir}))
-            run_cli(["upload", "-s", session, str(ROOT / "model_cache" / "verified_manifest.json"),
-                     REMOTE + "/model_manifest.json"], timeout=120)
-            run_cli(["upload", "-s", session, str(mount_cfg), REMOTE + "/drive_mount_config.json"], timeout=120)
-            mount_probe = exec_script(session, ROOT / "h3_drive_probe.py", timeout=180)
-            if "MUSE_DRIVE_MOUNT_MODELS_VISIBLE 4" not in mount_probe["stdout"]:
-                raise RuntimeError("Mounted Drive model cache not visible; release GPU")
-            result["four_files_visible"] = True
-            # Step 6: disk space + first-256MB real read throughput + full restore projection.
-            restore = exec_script(session, ROOT / "h3_restore_probe.py", timeout=600)
-            parsed = parse_restore_probe(restore["stdout"] + "\n" + restore["stderr"])
-            if not parsed.get("ok"):
-                raise RuntimeError("Remote 256MB restore probe did not complete: " + str(parsed)[:300])
-            projection = estimate_restore(
-                TOTAL_MODEL_BYTES,
-                free_bytes=parsed.get("disk_free_bytes"),
-                measured_mbps=parsed.get("mbps_256mb"),
-                rate_cu_h=live["rate"],
-                budget_cu=float(args.per_session_budget_cu),
-            )
-            result["restore"] = {**parsed, "projection": projection}
-            result["gpu"] = gpu_info
-            result["attempts"] = attempts
-            result["live_rate_cu_h"] = live["rate"]
-            result["session_budget_sec"] = budget_sec
-            live = inspect()
-            ledger = reconcile_budget(ledger, live["cu_balance"], LEDGER_PATH)
-            result["live_balance_cu"] = live["cu_balance"]
-            result["ledger_spent_cu"] = ledger["max_observed_spent_cu"]
-            (run_dir / "acceptance.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
-            return result
-        finally:
-            if watchdog_proc is not None:
-                try:
-                    watchdog_proc.terminate()
-                except Exception:
-                    pass
+        gpu_info = probe_actual_gpu(session, chosen_key)
+        record({"event": "gpu_probed", "session": session, **gpu_info})
+        live = inspect()
+        if live["rate"] is None or live["rate"] <= 0 or live["rate"] > args.max_rate_cu_h:
+            raise RuntimeError("Unknown/excessive live CU/hr rate")
+        ledger = reconcile_budget(ledger, live["cu_balance"], LEDGER_PATH)
+        unbilled = estimate_unbilled_cu(session_rec.get("started_at_utc"), live["rate"])
+        record({"event": "unbilled_estimate", "session": session, "unbilled_cu": unbilled,
+                "rate_cu_h": live["rate"], "posted_balance_cu": live["cu_balance"]})
+        budget_sec = allowed_runtime_seconds(live["rate"], live["cu_balance"], ledger,
+                                             session_spent_cu=unbilled, unbilled_cu=unbilled)
+        budget_sec = min(budget_sec, args.max_wall_sec)
+        if budget_sec < 300:
+            raise RuntimeError("Budget cannot cover minimal task + cleanup reserve")
+        # Step 3: remote signature probe FIRST. No timeout_ms -> stop immediately.
+        sig = exec_script(session, ROOT / "h3_mount_signature_probe.py", timeout=120)
+        result["signature_output"] = (sig["stdout"] + "\n" + sig["stderr"]).strip()[-500:]
+        if not check_mount_signature(sig):
+            raise RuntimeError("Remote drive.mount does not accept timeout_ms; abort before drivemount")
+        result["signature_supported"] = True
+        # Step 4: official interactive Drive mount (patched remote timeout 600s).
+        timeline = mount_drive(session, deadline_sec=budget_sec, run_id=args.run_id,
+                               timeline_path=run_dir / "mount_timeline.json")
+        result["timeline"] = timeline
+        result["mount_success"] = timeline.get("outcome") == "mounted"
+        if not result["mount_success"]:
+            raise RuntimeError(f"Drive mount failed: outcome={timeline.get('outcome')} error={timeline.get('error')}")
+        # Step 5: drive probe — four weights must be visible (returncode 0 is not enough).
+        exec_script(session, ROOT / "h3_init_remote.py", timeout=60)
+        mount_cfg = RUNS / f"mount_{session}.json"
+        mount_cfg.write_text(json.dumps({"drive_cache_dir": args.drive_cache_dir}))
+        run_cli(["upload", "-s", session, str(ROOT / "model_cache" / "verified_manifest.json"),
+                 REMOTE + "/model_manifest.json"], timeout=120)
+        run_cli(["upload", "-s", session, str(mount_cfg), REMOTE + "/drive_mount_config.json"], timeout=120)
+        mount_probe = exec_script(session, ROOT / "h3_drive_probe.py", timeout=180)
+        if "MUSE_DRIVE_MOUNT_MODELS_VISIBLE 4" not in mount_probe["stdout"]:
+            raise RuntimeError("Mounted Drive model cache not visible; release GPU")
+        result["four_files_visible"] = True
+        # Step 6: disk space + first-256MB real read throughput + full restore projection.
+        restore = exec_script(session, ROOT / "h3_restore_probe.py", timeout=600)
+        parsed = parse_restore_probe(restore["stdout"] + "\n" + restore["stderr"])
+        if not parsed.get("ok"):
+            raise RuntimeError("Remote 256MB restore probe did not complete: " + str(parsed)[:300])
+        projection = estimate_restore(
+            TOTAL_MODEL_BYTES,
+            free_bytes=parsed.get("disk_free_bytes"),
+            measured_mbps=parsed.get("mbps_256mb"),
+            rate_cu_h=live["rate"],
+            budget_cu=float(args.per_session_budget_cu),
+        )
+        result["restore"] = {**parsed, "projection": projection}
+        result["gpu"] = gpu_info
+        result["attempts"] = attempts
+        result["live_rate_cu_h"] = live["rate"]
+        result["session_budget_sec"] = budget_sec
+        live = inspect()
+        ledger = reconcile_budget(ledger, live["cu_balance"], LEDGER_PATH)
+        result["live_balance_cu"] = live["cu_balance"]
+        result["ledger_spent_cu"] = ledger["max_observed_spent_cu"]
+        (run_dir / "acceptance.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
+        return result
     finally:
         if allocation_attempted and session is not None:
             stop_result = stop_and_verify_session(session)
             stop_ok = stop_result["stopped_confirmed"]
-            try:
-                mark_session_stopped(session)
-            except Exception:
-                pass
+            if watchdog_proc is not None:
+                if stop_ok:
+                    try:
+                        watchdog_proc.terminate()
+                    except Exception:
+                        pass
+                else:
+                    record({"event": "watchdog_left_running",
+                            "session": session, "run_id": args.run_id,
+                            "production_task_id": "h3-ab-20261111",
+                            "stop_state": stop_result.get("state"),
+                            "reason": "stop not confirmed; watchdog keeps deadline protection"})
             record({"event": "finished", "session": session, "variant": "ACCEPTANCE", "stop_verified": stop_ok,
+                    "run_id": args.run_id, "stop_state": stop_result.get("state"),
+                    "record_marked": stop_result.get("record_marked", False),
                     "allocation_attempted": allocation_attempted, "elapsed_sec": round(time.monotonic() - start, 1)})
             result["stop_verified"] = stop_ok
             result["elapsed_sec"] = round(time.monotonic() - start, 1)

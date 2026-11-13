@@ -122,7 +122,7 @@ class StopManagedGuardTest(unittest.TestCase):
             record_session(SID, "G4", "run-1", "2026-11-12T13:00:00+00:00",
                            path=state, production_task_id="h3-ab-20261112")
             from h3_session_watchdog import mark_session_stopped
-            mark_session_stopped(SID, path=state)
+            mark_session_stopped(SID, SessionState.STOPPED, path=state)
             with mock.patch.object(wd, "_run_colab") as run:
                 result = stop_managed_session(SID, path=state)
             run.assert_not_called()
@@ -192,7 +192,7 @@ class CliStopSubcommandTest(unittest.TestCase):
                                      "--session", SID])
             self.assertEqual(rc, 0)
             stop_fn.assert_called_once()
-            marked.assert_called_once_with(SID)
+            marked.assert_called_once_with(SID, SessionState.STOPPED)
 
     def test_cli_stop_unknown_exits_1_without_marking(self):
         with tempfile.TemporaryDirectory() as d:

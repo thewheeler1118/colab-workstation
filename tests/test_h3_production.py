@@ -452,15 +452,19 @@ class ProductionTest(unittest.TestCase):
 
         # stop_and_verify_session consults the three-state query (TASK-005
         # §3): first ACTIVE (stop is attempted), then STOPPED (confirmed).
+        # TASK-006 P0-A: the confirmed stop also marks the managed record —
+        # mocked here so the test never touches the real state file.
         with mock.patch("h3_session_watchdog.query_session_state",
                         side_effect=[SessionState.ACTIVE, SessionState.STOPPED]), \
              mock.patch.object(h3_controller, "run_cli", fake_run_cli), \
              mock.patch.object(h3_controller, "record", lambda data: None), \
+             mock.patch("h3_session_watchdog.mark_session_stopped") as marked, \
              mock.patch("h3_budget.read_live_usage",
                         return_value={"balance": 160.0, "rate": 0.0}):
             result = h3_controller.stop_and_verify_session("muse-h3-abc123")
             self.assertTrue(result["stopped_confirmed"])
             self.assertIn(["stop", "-s", "muse-h3-abc123"], calls)
+            marked.assert_called_once_with("muse-h3-abc123", SessionState.STOPPED)
 
     def test_late_gpu_allocation_reconciled(self):
         # Watchdog reconcile must report a still-active managed session.

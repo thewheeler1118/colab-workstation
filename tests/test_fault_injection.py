@@ -374,8 +374,8 @@ class ChainHarness:
                                  path=self.state_path,
                                  production_task_id=production_task_id)
 
-    def _wrap_mark_stopped(self, session_id, path=None):
-        return self._real_mark_stopped(session_id, path=self.state_path)
+    def _wrap_mark_stopped(self, session_id, confirmed_state=None, path=None):
+        return self._real_mark_stopped(session_id, confirmed_state, path=self.state_path)
 
     def _wrap_update_deadline(self, session_id, deadline_utc, path=None):
         return self._real_update_deadline(session_id, deadline_utc,

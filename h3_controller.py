@@ -852,8 +852,16 @@ def stop_and_verify_session(session: str) -> dict:
     STOPPED = confirmed gone; ACTIVE = still there, retry the stop;
     UNKNOWN = cannot confirm — record a stop_error, retry bounded, and
     never report stopped_confirmed. Balance/rate for the audit record is
-    best-effort and never decides the verdict."""
-    from h3_session_watchdog import SessionState, query_session_state
+    best-effort and never decides the verdict.
+
+    TASK-006 P0-A (Issue #42): this function is the single place that
+    marks the managed record stopped, and only on a confirmed STOPPED
+    verdict. A marking failure never overturns a confirmed stop — the
+    record stays stale-active, which reconcile repairs from live
+    evidence. On an unconfirmed stop the record is deliberately left
+    `active` (session id, run id, task id, deadline all retained), so
+    no later path can mistake the GPU for released."""
+    from h3_session_watchdog import SessionState, mark_session_stopped, query_session_state
 
     stop_ok = False
     last_state = SessionState.UNKNOWN
@@ -887,9 +895,16 @@ def stop_and_verify_session(session: str) -> dict:
         except Exception as e:  # noqa: BLE001
             record({"event": "stop_error", "session": session, "attempt": attempt + 1, "error": str(e)[-250:]})
         time.sleep(3)
+    record_marked = False
+    if stop_ok:
+        try:
+            record_marked = mark_session_stopped(session, SessionState.STOPPED)
+        except Exception:  # noqa: BLE001 - marking is best-effort, never overturns a confirmed stop
+            record_marked = False
     if not stop_ok:
         record({"event": "CRITICAL_ORPHAN_RISK", "session": session})
-    return {"session": session, "stopped_confirmed": stop_ok, "state": last_state.value}
+    return {"session": session, "stopped_confirmed": stop_ok, "state": last_state.value,
+            "record_marked": record_marked}
 
 
 def reconcile_run_state(run_id: str) -> dict:
@@ -1606,6 +1621,7 @@ def run_variant(args) -> dict:
     created = False
     allocation_attempted = False
     stop_ok = False
+    watchdog_proc = None
     # TASK-003 (Issue #18): the production result and the stop result are
     # separate names. The old code reused `result` for both, so the outer
     # finally overwrote the production dict (run_id, video) with the stop
@@ -1849,11 +1865,11 @@ def run_variant(args) -> dict:
                              "local_video_validated": True},
             }
         finally:
-            if watchdog_proc is not None:
-                try:
-                    watchdog_proc.terminate()
-                except Exception:
-                    pass
+            # TASK-006 P0-A: the watchdog is deliberately NOT terminated
+            # here. It is terminated only after a confirmed stop (outer
+            # finally); on an unconfirmed stop it keeps running so it can
+            # enforce the deadline/hard-stop. Terminating it first would
+            # remove the only protection while the session is still live.
             _EXEC_LOG_DIR = None
     finally:
         # Capture the propagating exception FIRST: sys.exc_info() must be
@@ -1863,13 +1879,28 @@ def run_variant(args) -> dict:
         if allocation_attempted and session is not None:
             stop_result = stop_and_verify_session(session)
             stop_ok = stop_result["stopped_confirmed"]
-            from h3_session_watchdog import mark_session_stopped
-
-            try:
-                mark_session_stopped(session)
-            except Exception:
-                pass
+            if watchdog_proc is not None:
+                if stop_ok:
+                    try:
+                        watchdog_proc.terminate()
+                    except Exception:
+                        pass
+                else:
+                    # Leave the watchdog alive: it still enforces the
+                    # deadline/hard-stop for a session whose stop could
+                    # not be confirmed. The managed record stays `active`
+                    # (stop_and_verify_session marks it only on a
+                    # confirmed STOPPED), so reconcile/resume keep seeing
+                    # this session as a live, billable GPU.
+                    record({"event": "watchdog_left_running",
+                            "session": session, "run_id": args.run_id,
+                            "production_task_id": args.production_task_id,
+                            "stop_state": stop_result.get("state"),
+                            "reason": "stop not confirmed; watchdog keeps deadline protection"})
             record({"event": "finished", "session": session, "variant": variant, "stop_verified": stop_ok,
+                    "run_id": args.run_id, "production_task_id": args.production_task_id,
+                    "stop_state": stop_result.get("state"),
+                    "record_marked": stop_result.get("record_marked", False),
                     "allocation_attempted": allocation_attempted, "elapsed_sec": round(time.monotonic() - start, 1)})
             # Durable manifest terminal update for the GPU phase (TASK-005
             # §4.1): on the success path this records GPU_STOP_CONFIRMED;
