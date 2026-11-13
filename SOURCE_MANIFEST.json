@@ -413,8 +413,8 @@
     },
     {
       "path": "docs/module_inventory.md",
-      "size_bytes": 35813,
-      "sha256": "2c35955cdb349ea05d9b1a7d9d015ad810b031bd2d4ae9c015d13201e3b661ce",
+      "size_bytes": 36927,
+      "sha256": "d67cad0b9d663a9b16b45700eaec36254dc4cd27d2c36ef998bec82c25e86909",
       "role": "Module inventory (this table's source of truth for hashes)"
     },
     {
@@ -503,14 +503,14 @@
     },
     {
       "path": "drive_api.py",
-      "size_bytes": 3329,
-      "sha256": "5c3dc379e156fdc81c42b86d4bc9f119b51d4db80750e769432968bd2c30d545",
+      "size_bytes": 3546,
+      "sha256": "3e065b50aae4b921dcdf359b788b737f107818cc61e5c3ced293f489ca1fd360",
       "role": "Drive v3 file evidence + upload helpers"
     },
     {
       "path": "drive_depot.py",
-      "size_bytes": 30132,
-      "sha256": "20b7eb9d105c3585accdd646ff01b860e4d365251ec9922dac349c48fc6fb8d5",
+      "size_bytes": 29772,
+      "sha256": "3443b0ce2362b73b09ea14d654e1e3a6dcea66c6353e2cbf7bcb6d308da96f01",
       "role": "Model depot init / seed / verify via Drive API (READY manifest)"
     },
     {
@@ -521,8 +521,8 @@
     },
     {
       "path": "environment_manifest.json",
-      "size_bytes": 1345,
-      "sha256": "b6d0c02160f57b68686c9965d9ec1f3ef01501f69338a4277959505dce598a4e",
+      "size_bytes": 1418,
+      "sha256": "446ceb5498b33e46fa723eb745b1d4baf389fca3082ec45176cbbb8d25e41275",
       "role": "Supporting file"
     },
     {
@@ -568,9 +568,15 @@
       "role": "Remote mounted-model visibility probe (4 files, exact sizes)"
     },
     {
+      "path": "h3_drive_transport.py",
+      "size_bytes": 5168,
+      "sha256": "52b00c9a7248a6743b7ad7cfbbbec4597732b481394625eb0802c8371ceb71df",
+      "role": "Supporting file"
+    },
+    {
       "path": "h3_environment.py",
-      "size_bytes": 11786,
-      "sha256": "4f7cc7220452d3050b17d814557fccd96af8fb7c8573e4cd7ec36b1a5392de3e",
+      "size_bytes": 13488,
+      "sha256": "c7d5c1355687c7223574cf173c8cddde555c99c24690d3cf1594c8aa31b35e1b",
       "role": "Supporting file"
     },
     {
@@ -904,6 +910,12 @@
       "role": "Tests: resumable upload, 411 fallback, cross-process resume"
     },
     {
+      "path": "tests/test_drive_transport.py",
+      "size_bytes": 11248,
+      "sha256": "7c5b9c4c3b009b626d6504d4eaca2e6998e367e0f7c8a6c8587ccd00a89d5c6b",
+      "role": "Tests"
+    },
+    {
       "path": "tests/test_durable_artifact_delivery.py",
       "size_bytes": 9126,
       "sha256": "969463adf76330af185d9110ef2c4040c62ae0684c4eab9ef7cac421ee4e5dbc",
@@ -911,8 +923,8 @@
     },
     {
       "path": "tests/test_environment_contract.py",
-      "size_bytes": 9495,
-      "sha256": "97bb59755d7f999fd5ad1b5ec43c45a39811d32889ed74b4a9293e8e1179a9a0",
+      "size_bytes": 10124,
+      "sha256": "23c42cc8aabfb605b54f1d0af896f84bbd0b4ffd4ac7997b2a13610087bc103f",
       "role": "Tests"
     },
     {

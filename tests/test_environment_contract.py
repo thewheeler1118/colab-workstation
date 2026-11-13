@@ -87,7 +87,8 @@ class GenerateTest(unittest.TestCase):
         workflow = ROOT / "workflow_api.json"
         self.assertEqual(m["workflow_sha256"],
                          hashlib.sha256(workflow.read_bytes()).hexdigest())
-        self.assertEqual(m["drive_transport"]["status"], "KNOWN_BROKEN_ON_THIS_VM")
+        self.assertEqual(m["drive_transport"]["transport"], "requests")
+        self.assertIn("PR-7", m["drive_transport"]["status"])
         # ffmpeg/ffprobe fields are consistent with the real tools.
         self.assertEqual(m["ffmpeg_present"], m["ffmpeg_version"] is not None)
         self.assertEqual(m["ffprobe_present"], m["ffprobe_version"] is not None)
@@ -121,6 +122,7 @@ class VerifyTest(unittest.TestCase):
             "python_major_minor_allowed": ["3.11", "3.12"],
             "ffmpeg_present": True,
             "ffprobe_present": True,
+            "drive_transport": {"transport": "requests"},
         }
         base.update(over)
         return base
@@ -135,6 +137,7 @@ class VerifyTest(unittest.TestCase):
             "ffmpeg_present": True,
             "ffprobe_present": True,
             "cli_executable": "/fake/bin/colab",
+            "drive_transport": {"transport": "requests"},
         }
         base.update(over)
         return base
@@ -143,7 +146,15 @@ class VerifyTest(unittest.TestCase):
         with mock.patch.object(he, "_live_environment", return_value=self._live()):
             report = he.verify_environment(manifest=self._manifest())
         self.assertTrue(report["ok"])
-        self.assertEqual(len(report["checked"]), 7)
+        self.assertEqual(len(report["checked"]), 8)
+
+    def test_transport_mismatch_names_field(self):
+        with mock.patch.object(he, "_live_environment",
+                               return_value=self._live(
+                                   drive_transport={"transport": "httplib2"})):
+            with self.assertRaisesRegex(he.EnvironmentMismatch,
+                                        "drive_transport.transport.*requests.*httplib2"):
+                he.verify_environment(manifest=self._manifest())
 
     def test_version_mismatch_names_field(self):
         with mock.patch.object(he, "_live_environment",
