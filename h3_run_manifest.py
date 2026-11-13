@@ -8,11 +8,22 @@ a Colab temp disk, never in git).
 
 Schema (one JSON file per run_id, atomically written):
 
-    production_task_id, run_id, variant, code_commit, workflow_sha256,
-    model_manifest_sha256, session_id, session_state (ACTIVE/STOPPED/
-    UNKNOWN), task_state, last_heartbeat_utc, last_verified_stage,
-    last_error, artifacts, budget, recovery_generation, created_at_utc,
-    updated_at_utc
+    schema_version, production_task_id, run_id, variant, code_commit,
+    workflow_sha256, model_manifest_sha256, session_id, session_state
+    (ACTIVE/STOPPED/UNKNOWN), task_state, last_heartbeat_utc,
+    last_verified_stage, last_error, artifacts, budget,
+    recovery_generation, created_at_utc, updated_at_utc
+
+Schema versions (TASK-006 P1-A, Issue #48): v1 manifests (no
+schema_version key) load unchanged; new fields default safely
+(delivery_state absent, drive_verified_before_stop False,
+remote_upload absent). v2 adds: schema_version 2, the worker-side
+artifact axis in artifacts (delivery_state REMOTE_UPLOAD_STARTED /
+REMOTE_UPLOAD_VERIFIED, remote_upload evidence, drive_verified_before_stop),
+and the TASK_COMPLETED gate now requires session_state == STOPPED as
+well as task_state == DRIVE_VERIFIED. Old manifests are never
+rewritten; a v1 manifest is upgraded in place only when update_run
+writes it again, and then only by adding the new fields.
 
 Rules:
 - Atomic writes (temp file + os.replace + fsync).
@@ -21,7 +32,14 @@ Rules:
 - Append-only audit log (<run_id>.audit.jsonl): one JSON object per line,
   never rewritten. Important events (creation, stage changes, errors,
   anomalies, resumes) are appended here.
-- Task state and GPU session state are modelled separately.
+- Task state and GPU session state are modelled separately. The artifact
+  axis (artifacts.delivery_state) is a third, independent axis: the
+  worker may reach REMOTE_UPLOAD_VERIFIED while the GPU is still
+  ACTIVE, and the controller may reach DRIVE_VERIFIED before
+  GPU_STOP_CONFIRMED. That out-of-order verification is recorded
+  honestly (DRIVE_VERIFIED_BEFORE_STOP audit event +
+  artifacts.drive_verified_before_stop = True), never by faking
+  GPU_STOP_CONFIRMED.
 - Terminal states: TASK_COMPLETED, FAILED, COMPLETED_AWAITING_ARCHIVE.
   A terminal run never moves again except through resume_run() + an
   explicit reopen (PR-4).
@@ -57,6 +75,12 @@ TASK_STAGES = [
 ]
 TERMINAL_STATES = {"TASK_COMPLETED", "FAILED", "COMPLETED_AWAITING_ARCHIVE"}
 _STAGE_INDEX = {name: i for i, name in enumerate(TASK_STAGES)}
+# Delivery-state order (TASK-006 P1-A, Issue #48): the artifact axis is
+# forward-only, like the task axis. A backward move is refused and
+# logged as an anomaly, never applied.
+_DELIVERY_ORDER = ["TEMPORARY", "COMPLETE_LOCAL", "REMOTE_UPLOAD_STARTED",
+                   "REMOTE_UPLOAD_VERIFIED", "DURABLE_UPLOAD_STARTED",
+                   "DURABLE_UPLOAD_VERIFIED", "DELIVERED"]
 # FAILED and COMPLETED_AWAITING_ARCHIVE are terminal states outside the
 # linear order; they sort after every linear stage for comparison.
 _TERMINAL_INDEX = len(TASK_STAGES)
@@ -150,6 +174,8 @@ def create_run_manifest(root: Path, production_task_id: str, run_id: str,
         raise FileExistsError(f"run manifest already exists for {run_id}; use resume, not re-create")
     now = _utc_now()
     manifest = {
+        # TASK-006 P1-A: schema_version 2 (missing key means v1).
+        "schema_version": 2,
         "production_task_id": production_task_id,
         "run_id": run_id,
         "variant": variant,
@@ -197,6 +223,15 @@ def list_runs(root: Path) -> list:
     return runs
 
 
+def manifest_schema_version(manifest: dict) -> int:
+    """Schema version of a manifest dict. Missing key means v1 (all
+    manifests written before TASK-006 P1-A)."""
+    try:
+        return int(manifest.get("schema_version", 1))
+    except (TypeError, ValueError):
+        return 1
+
+
 def update_run(root: Path, run_id: str, task_state: str | None = None,
                session_state=None, session_id: str | None = None,
                last_verified_stage: str | None = None,
@@ -207,7 +242,15 @@ def update_run(root: Path, run_id: str, task_state: str | None = None,
 
     - task_state moves forward only (by stage index); a backward move is
       recorded as an audit anomaly and ignored.
-    - TASK_COMPLETED requires the current state to be DRIVE_VERIFIED.
+    - TASK_COMPLETED requires the current state to be DRIVE_VERIFIED
+      AND session_state == STOPPED (TASK-006 P1-A: Drive may be
+      verified before the GPU stop is confirmed, and a completed task
+      must never hide a billing GPU). A caller passing
+      session_state=STOPPED in the same call satisfies the gate.
+    - DRIVE_VERIFIED reached while session_state != STOPPED is
+      recorded honestly: a DRIVE_VERIFIED_BEFORE_STOP audit event and
+      artifacts.drive_verified_before_stop = True. The stage order is
+      never faked by marking GPU_STOP_CONFIRMED early.
     - Terminal states never move again unless reopen=True (resume path).
     - last_verified_stage only moves forward.
     - session_state accepts a SessionState enum or its string value.
@@ -220,6 +263,7 @@ def update_run(root: Path, run_id: str, task_state: str | None = None,
     changed = False
     anomaly = None
     now = _utc_now()
+    verified_before_stop_pending = False
 
     if task_state is not None:
         current = manifest.get("task_state", "PREFLIGHT")
@@ -227,10 +271,25 @@ def update_run(root: Path, run_id: str, task_state: str | None = None,
             anomaly = (f"refused move {current} -> {task_state}: run is terminal; "
                        "resume with reopen instead")
             record_audit_event(root, run_id, "ANOMALY", {"detail": anomaly})
-        elif task_state == "TASK_COMPLETED" and current != "DRIVE_VERIFIED" and not reopen:
-            anomaly = (f"refused move {current} -> TASK_COMPLETED: Drive must be "
-                       "verified first")
-            record_audit_event(root, run_id, "ANOMALY", {"detail": anomaly})
+        elif task_state == "TASK_COMPLETED" and not reopen:
+            # Effective session state: the session_state argument of
+            # this call counts, so a combined stop+complete update works.
+            if session_state is not None:
+                effective_session = getattr(session_state, "value", session_state)
+            else:
+                effective_session = manifest.get("session_state")
+            if current != "DRIVE_VERIFIED":
+                anomaly = (f"refused move {current} -> TASK_COMPLETED: Drive must be "
+                           "verified first")
+                record_audit_event(root, run_id, "ANOMALY", {"detail": anomaly})
+            elif effective_session != "STOPPED":
+                anomaly = (f"refused move {current} -> TASK_COMPLETED: GPU session "
+                           f"is {effective_session}, not STOPPED")
+                record_audit_event(root, run_id, "ANOMALY", {"detail": anomaly})
+            elif task_state != current:
+                manifest["task_state"] = task_state
+                changed = True
+                record_audit_event(root, run_id, "STAGE", {"from": current, "to": task_state})
         elif _stage_index(task_state) < _stage_index(current) and not reopen:
             anomaly = f"refused backward move {current} -> {task_state}"
             record_audit_event(root, run_id, "ANOMALY", {"detail": anomaly})
@@ -238,6 +297,8 @@ def update_run(root: Path, run_id: str, task_state: str | None = None,
             manifest["task_state"] = task_state
             changed = True
             record_audit_event(root, run_id, "STAGE", {"from": current, "to": task_state})
+            if task_state == "DRIVE_VERIFIED":
+                verified_before_stop_pending = True
 
     if last_verified_stage is not None:
         current_verified = manifest.get("last_verified_stage", "PREFLIGHT")
@@ -251,6 +312,17 @@ def update_run(root: Path, run_id: str, task_state: str | None = None,
             manifest["session_state"] = value
             changed = True
 
+    if verified_before_stop_pending and manifest.get("session_state") != "STOPPED":
+        # Drive was verified while the GPU session was not confirmed
+        # stopped. Record it honestly instead of faking the stop stage.
+        record_audit_event(root, run_id, "DRIVE_VERIFIED_BEFORE_STOP",
+                           {"session_state": manifest.get("session_state")})
+        merged_artifacts = {**manifest.get("artifacts", {}),
+                            "drive_verified_before_stop": True}
+        if merged_artifacts != manifest.get("artifacts", {}):
+            manifest["artifacts"] = merged_artifacts
+            changed = True
+
     if session_id is not None and session_id != manifest.get("session_id"):
         manifest["session_id"] = session_id
         changed = True
@@ -262,6 +334,21 @@ def update_run(root: Path, run_id: str, task_state: str | None = None,
 
     if artifacts:
         merged = {**manifest.get("artifacts", {}), **artifacts}
+        # TASK-006 P1-A: delivery_state is a forward-only axis. A
+        # backward move (e.g. REMOTE_UPLOAD_VERIFIED -> TEMPORARY from
+        # a stale local-state update) is refused and logged as an
+        # anomaly, never applied. Unknown states are passed through
+        # unchanged (no order to enforce against).
+        old_delivery = (manifest.get("artifacts") or {}).get("delivery_state")
+        new_delivery = artifacts.get("delivery_state")
+        if old_delivery and new_delivery and old_delivery in _DELIVERY_ORDER \
+                and new_delivery in _DELIVERY_ORDER:
+            if _DELIVERY_ORDER.index(new_delivery) < _DELIVERY_ORDER.index(old_delivery):
+                record_audit_event(
+                    root, run_id, "ANOMALY",
+                    {"detail": f"refused backward delivery_state move "
+                               f"{old_delivery} -> {new_delivery}"})
+                merged["delivery_state"] = old_delivery
         if merged != manifest.get("artifacts", {}):
             manifest["artifacts"] = merged
             changed = True
@@ -302,11 +389,21 @@ def recovery_view(root: Path, run_id: str) -> dict:
         reason = "run failed; resume needs an explicit operator decision, not an automatic restart"
     elif state == "COMPLETED_AWAITING_ARCHIVE":
         reason = "video is durable locally; resume means archive-only retry, never re-inference"
+    elif state == "DRIVE_VERIFIED" and manifest.get("session_state") != "STOPPED":
+        reason = ("Drive verified before GPU stop confirmed; complete the "
+                  "stop before marking TASK_COMPLETED")
+    artifacts = manifest.get("artifacts", {})
     return {"manifest": manifest, "resumable": resumable, "reason": reason,
             "completed_stages": done, "current_stage": state, "next_stage": nxt,
             "session_state": manifest.get("session_state"),
             "session_id": manifest.get("session_id"),
-            "artifacts": manifest.get("artifacts", {})}
+            "artifacts": artifacts,
+            # TASK-006 P1-A artifact axis (v1 manifests default safely):
+            "delivery_state": artifacts.get("delivery_state"),
+            "drive_verified_before_stop": bool(
+                artifacts.get("drive_verified_before_stop", False)),
+            "remote_upload": artifacts.get("remote_upload"),
+            "schema_version": manifest_schema_version(manifest)}
 
 
 def resume_run(root: Path, run_id: str) -> dict:

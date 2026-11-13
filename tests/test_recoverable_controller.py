@@ -341,7 +341,10 @@ class _ResumeBase(unittest.TestCase):
 
 class ResumeTerminalTest(_ResumeBase):
     def test_completed_is_a_noop(self):
-        self._manifest(task_state="DRIVE_VERIFIED")
+        # TASK-006 P1-A: a completed run has a confirmed STOPPED session;
+        # the fixture must model that, or the TASK_COMPLETED move itself
+        # is refused by the new gate.
+        self._manifest(task_state="DRIVE_VERIFIED", session_state="STOPPED")
         rm.update_run(self.root, RUN_ID, task_state="TASK_COMPLETED")
         result = hc._resume_run(self._args())
         self.assertFalse(result["resumed"])
@@ -354,7 +357,10 @@ class ResumeTerminalTest(_ResumeBase):
         self.assertIn("explicit operator decision", result["reason"])
 
     def test_awaiting_archive_archives_only(self):
-        self._manifest(task_state="COMPLETED_AWAITING_ARCHIVE")
+        # COMPLETED_AWAITING_ARCHIVE is only entered after the GPU stop
+        # was confirmed, so the fixture's session is STOPPED.
+        self._manifest(task_state="COMPLETED_AWAITING_ARCHIVE",
+                       session_state="STOPPED")
         self._ledger()
         delivery = {"state": "DELIVERY_COMPLETED", "drive_file_id": "drive-file-9"}
         with mock.patch.object(hc, "_archive_local_mp4", return_value=delivery):
@@ -448,6 +454,21 @@ class ResumeStoppedSessionTest(_ResumeBase):
         self.assertIn("nothing recoverable", result["reason"])
         self.assertEqual(rm.load_run_manifest(self.root, RUN_ID)["task_state"],
                          "FAILED")
+
+    def test_stopped_after_remote_upload_started_marks_artifact_lost(self):
+        # TASK-006 P1-A: the runtime is gone, so the remote temp disk is
+        # gone with it. A worker upload was in flight and no durable
+        # copy exists anywhere: the run FAILS with artifact_lost set,
+        # and nothing is silently re-inferred.
+        self._manifest(task_state="VIDEO_VALIDATED",
+                       artifacts={"delivery_state": "REMOTE_UPLOAD_STARTED"})
+        self._ledger()
+        with self._active_stopped():
+            result = hc._resume_run(self._args())
+        self.assertFalse(result["resumed"])
+        m = rm.load_run_manifest(self.root, RUN_ID)
+        self.assertEqual(m["task_state"], "FAILED")
+        self.assertTrue(m["artifacts"].get("artifact_lost"))
 
 
 class ResumeLiveSessionTest(_ResumeBase):

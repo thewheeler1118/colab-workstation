@@ -52,6 +52,13 @@ WORKER_PHASE_TO_JOB_STAGE = {
     "find_rendered_video": "INFERENCE_RUNNING",
     "rescue_rendered_video": "INFERENCE_RUNNING",
     "assemble_mp4": "INFERENCE_COMPLETED",
+    # TASK-006 P1-A: the worker-side upload runs after assembly; the
+    # inference is already complete, so all three upload stages map to
+    # INFERENCE_COMPLETED on the job-state axis. The upload evidence
+    # itself travels in the job state's `extra` field.
+    "remote_upload": "INFERENCE_COMPLETED",
+    "remote_upload_verified": "INFERENCE_COMPLETED",
+    "remote_upload_failed": "INFERENCE_COMPLETED",
     "done": "VIDEO_READY",
 }
 
