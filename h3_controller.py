@@ -219,15 +219,33 @@ def _upload_drive_token(session: str, run_dir, token_doc: dict, remote_name: str
     return {"token_id": token_doc["token_id"], "remote_path": REMOTE + "/" + remote_name}
 
 
-def _mint_and_upload_drive_token(session: str, run_dir, remote_name: str) -> dict:
-    """Mint a fresh read-only token and upload it as a 0600 file.
-    One helper so the download branch has a single boundary (the
+def _mint_and_upload_drive_token(session: str, run_dir, remote_name: str, mint_fn=None) -> dict:
+    """Mint a fresh token and upload it as a 0600 file.
+    One helper so the token branches have a single boundary (the
     chain harnesses stub this, like mount_drive); the real mint +
-    upload are covered by tests/test_drive_download.py."""
+    upload are covered by tests/test_drive_download.py. `mint_fn`
+    selects the scope: read-only by default, `mint_file_token` for
+    the P1-A worker upload token (TASK-006 P1-A)."""
     import h3_drive_token
 
-    return _upload_drive_token(session, run_dir,
-                               h3_drive_token.mint_readonly_token(), remote_name)
+    mint = mint_fn or h3_drive_token.mint_readonly_token
+    return _upload_drive_token(session, run_dir, mint(), remote_name)
+
+
+def _build_drive_upload_block(run_id: str, variant: str) -> dict:
+    """Pre-create the run's Drive output folder and build the
+    drive_upload task block (TASK-006 P1-A). The folder is created with
+    the full-scope controller service so the worker's least-privilege
+    drive.file token only ever writes into a folder this app created.
+    Returns {folder_id, file_name, run_id, variant} — ids only, never
+    a token value."""
+    from drive_depot import drive_service, ensure_folder
+
+    service = drive_service()
+    out_root = ensure_folder(service, None, "Muse-H3-Video-Outputs", allow_write=True)
+    run_folder = ensure_folder(service, out_root, run_id, allow_write=True)
+    return {"folder_id": run_folder, "file_name": f"{variant}.mp4",
+            "run_id": run_id, "variant": variant}
 
 
 def create_run_id() -> str:
@@ -1222,6 +1240,76 @@ JOB_STAGE_TO_MANIFEST_STAGE = {
 }
 
 
+def _upload_wall_seconds(evidence: dict) -> float | None:
+    """Elapsed upload wall time in seconds from the worker evidence
+    timestamps (ISO UTC, Z-suffixed). None when either timestamp is
+    missing or unparsable — the evidence is still recorded; only the
+    derived wall time is absent."""
+    try:
+        import datetime
+
+        fmt = "%Y-%m-%dT%H:%M:%SZ"
+        start = datetime.datetime.strptime(
+            evidence["upload_started_at_utc"], fmt).replace(
+                tzinfo=datetime.timezone.utc)
+        finish = datetime.datetime.strptime(
+            evidence["upload_finished_at_utc"], fmt).replace(
+                tzinfo=datetime.timezone.utc)
+        return round((finish - start).total_seconds(), 3)
+    except Exception:
+        return None
+
+
+def _record_remote_upload(run_id: str, state: dict) -> dict | None:
+    """Record worker-side remote-upload evidence in the durable manifest
+    (TASK-006 P1-A). The worker's job state carries `remote_upload`
+    (evidence) or `remote_upload_failed` (error type) as top-level keys.
+    A verified worker upload means a Drive copy existed BEFORE the GPU
+    stop, so drive_verified_before_stop is recorded honestly; the task
+    axis still reaches DRIVE_VERIFIED only after the stop, when the
+    tail re-verifies the recorded id server-side against the local MP4
+    (deliver_variant_to_drive_idempotent reuses a recorded id only
+    after that verify). Returns the evidence dict or None.
+    Best-effort: never raises."""
+    try:
+        evidence = (state or {}).get("remote_upload")
+        if isinstance(evidence, dict) and evidence.get("drive_file_id"):
+            already_recorded = _recorded_delivery(run_id) == evidence["drive_file_id"]
+            artifacts = {
+                "delivery_state": "REMOTE_UPLOAD_VERIFIED",
+                "remote_upload": evidence,
+                "drive_file_id": evidence["drive_file_id"],
+                "drive_verified_before_stop": True,
+            }
+            if evidence.get("drive_output_folder_id"):
+                artifacts["drive_output_folder_id"] = evidence["drive_output_folder_id"]
+            # GPU cost of the worker-side upload: the wall time is
+            # recorded here from the evidence timestamps. The CU cost
+            # is wall_seconds x live session rate / 3600; the rate
+            # lives in the ledger/live inspect, so the CU attribution
+            # is derived by the operator from these two numbers, not
+            # computed in this helper.
+            wall = _upload_wall_seconds(evidence)
+            if wall is not None:
+                artifacts["upload_wall_seconds"] = wall
+            _manifest_update(run_id, artifacts=artifacts)
+            if not already_recorded:
+                record({"event": "remote_upload_verified", "run_id": run_id,
+                        "drive_file_id": evidence["drive_file_id"],
+                        "size": evidence.get("size"),
+                        "sha256": (evidence.get("sha256") or "")[:16],
+                        "reused": bool(evidence.get("reused"))})
+            return evidence
+        failed = (state or {}).get("remote_upload_failed")
+        if isinstance(failed, dict):
+            record({"event": "remote_upload_failed", "run_id": run_id,
+                    "error_type": failed.get("error_type"),
+                    "error": str(failed.get("error", ""))[:300]})
+    except Exception:
+        pass
+    return None
+
+
 def _manifest_worker_state(run_id: str, state: dict) -> None:
     """Record a polled worker state in the durable manifest (best-effort).
     Forward-only enforcement lives in update_run: a stale or out-of-order
@@ -1233,6 +1321,10 @@ def _manifest_worker_state(run_id: str, state: dict) -> None:
                          last_verified_stage=manifest_stage)
     else:
         _manifest_update(run_id, heartbeat=True)
+    # TASK-006 P1-A: a poll that catches the worker's upload evidence
+    # records it immediately, so a controller restart after VIDEO_READY
+    # still finds the Drive id in the manifest.
+    _record_remote_upload(run_id, state)
 
 
 def _handle_token_refresh_request(session: str, run_id: str, run_dir,
@@ -1264,13 +1356,24 @@ def _handle_token_refresh_request(session: str, run_id: str, run_dir,
                 "reason": f"max renewals reached ({MAX_TOKEN_RENEWALS})"})
         renewal_state["last_token_id"] = token_id
         return
+    # TASK-006 P1-A: the scope tells the controller which token to mint
+    # and which remote file to replace. drive.file renews the worker
+    # upload token; anything else (including a missing scope, for
+    # backward compatibility) renews the read-only download token.
+    if req.get("scope") == "drive.file":
+        remote_name = "drive_upload_token.json"
+        mint_fn = h3_drive_token.mint_file_token
+    else:
+        remote_name = "drive_token.json"
+        mint_fn = h3_drive_token.mint_readonly_token
     try:
-        doc = h3_drive_token.mint_readonly_token()
-        _upload_drive_token(session, run_dir, doc, "drive_token.json")
+        doc = mint_fn()
+        _upload_drive_token(session, run_dir, doc, remote_name)
         renewal_state["count"] = renewal_state.get("count", 0) + 1
         renewal_state["last_token_id"] = token_id
         record({"event": "token_renewed", "session": session,
                 "run_id": run_id, "token_id": doc["token_id"],
+                "remote_name": remote_name,
                 "renewals_used": renewal_state["count"]})
     except Exception as e:  # noqa: BLE001 - recorded, worker fails closed
         record({"event": "token_renewal_failed", "session": session,
@@ -1422,6 +1525,7 @@ def _resume_archive_only(args, manifest: dict) -> dict:
                 "manifest_task_state": "COMPLETED_AWAITING_ARCHIVE"}
     _manifest_update(run_id, task_state="DRIVE_VERIFIED",
                      last_verified_stage="DRIVE_VERIFIED",
+                     session_state="STOPPED",
                      artifacts={"drive_file_id": delivery.get("drive_file_id"),
                                 "drive_output_folder_id": delivery.get("drive_output_folder_id"),
                                 "delivery_state": "DELIVERED"},
@@ -1447,8 +1551,12 @@ def _resume_stopped_session(args, manifest: dict) -> dict:
         except Exception as e:  # noqa: BLE001 - local copy unusable
             return {"resumed": False, "run_id": run_id,
                     "reason": f"session stopped and the local MP4 cannot be archived: {e}"}
+        # TASK-006 P1-A: the session is known STOPPED here (the tristate
+        # query said so); record it with the DRIVE_VERIFIED move so the
+        # TASK_COMPLETED gate (which requires a STOPPED session) can pass.
         _manifest_update(run_id, task_state="DRIVE_VERIFIED",
                          last_verified_stage="DRIVE_VERIFIED",
+                         session_state="STOPPED",
                          artifacts={"drive_file_id": delivery.get("drive_file_id"),
                                     "drive_output_folder_id": delivery.get("drive_output_folder_id"),
                                     "delivery_state": "DELIVERED"})
@@ -1464,17 +1572,46 @@ def _resume_stopped_session(args, manifest: dict) -> dict:
             drive = drive_service()
             meta = drive.files().get(fileId=drive_file_id,
                                      fields="id,name,size,trashed,md5Checksum").execute()
-            if meta.get("id") == drive_file_id and not meta.get("trashed"):
+            # TASK-006 P1-A: when the worker's remote-upload evidence is
+            # on record, the metadata check also compares size + MD5
+            # against it — an id alone is not proof the right bytes are
+            # there. Without that evidence the id + not-trashed check
+            # keeps its previous meaning.
+            remote = (manifest.get("artifacts") or {}).get("remote_upload") or {}
+            ok = meta.get("id") == drive_file_id and not meta.get("trashed")
+            if ok and remote.get("size") is not None:
+                ok = int(meta.get("size", -1)) == int(remote["size"])
+            if ok and remote.get("md5"):
+                ok = (meta.get("md5Checksum") or "").lower() == str(remote["md5"]).lower()
+            if ok:
+                # TASK-006 P1-A: the session is known STOPPED here (the
+                # tristate query said so); record it with the
+                # DRIVE_VERIFIED move so the TASK_COMPLETED gate can pass.
                 _manifest_update(run_id, task_state="DRIVE_VERIFIED",
-                                 last_verified_stage="DRIVE_VERIFIED")
+                                 last_verified_stage="DRIVE_VERIFIED",
+                                 session_state="STOPPED")
                 _manifest_update(run_id, task_state="TASK_COMPLETED")
                 return {"resumed": True, "run_id": run_id, "variant": variant,
                         "outcome": "session stopped; Drive file already verified server-side",
                         "drive_file_id": drive_file_id}
+            # Recorded id does not verify: fall through to FAILED below
+            # (no durable artifact). The mismatch is recorded in the
+            # audit event above, not silently re-uploaded.
+            record({"event": "recorded_drive_file_unverified", "run_id": run_id,
+                    "drive_file_id": drive_file_id})
         except Exception as e:  # noqa: BLE001 - Drive check unavailable
             return {"resumed": False, "run_id": run_id,
                     "reason": f"session stopped; Drive verification unavailable: {e}"}
+    # TASK-006 P1-A: the runtime is gone, so the remote temp disk is gone
+    # with it. When a worker upload was in flight (or verified) this is
+    # a lost artifact, recorded as such; the task FAILS and counts in
+    # the P1-C denominator. Never re-infer silently.
+    artifacts = manifest.get("artifacts") or {}
+    upload_in_flight = bool(artifacts.get("remote_upload")) or \
+        artifacts.get("delivery_state") in ("REMOTE_UPLOAD_STARTED",
+                                            "REMOTE_UPLOAD_VERIFIED")
     update_run(ROOT, run_id, task_state="FAILED",
+               artifacts={"artifact_lost": True} if upload_in_flight else None,
                last_error="Session stopped with no durable artifact: no validated "
                           "local MP4 and no verified Drive file")
     return {"resumed": False, "run_id": run_id,
@@ -1516,6 +1653,12 @@ def _resume_finish(args, manifest: dict, worker_state: dict) -> dict:
                                 "local_frames": info["frame_count"],
                                 "delivery_state": "COMPLETE_LOCAL"})
     _manifest_update(run_id, task_state="ARTIFACT_DURABLE")
+    # TASK-006 P1-A: record any worker-side remote-upload evidence the
+    # resumed worker state carries AFTER the COMPLETE_LOCAL update, so
+    # a worker upload is not clobbered back to COMPLETE_LOCAL by it.
+    # The tail below re-verifies the recorded id server-side before
+    # marking DRIVE_VERIFIED.
+    _record_remote_upload(run_id, worker_state)
     live = inspect()
     production_result = {
         "variant": variant, "run_id": run_id, "session": session_id,
@@ -2011,6 +2154,7 @@ def run_variant(args) -> dict:
             # never calls drivemount: the worker downloads from Drive
             # with a short-lived token instead.
             drive_download = None
+            drive_upload = None
             renewal_state = {"count": 0, "last_token_id": None}
             if drive_source == "mount":
                 # Remote signature probe: verify drive.mount accepts timeout_ms
@@ -2068,6 +2212,29 @@ def run_variant(args) -> dict:
                 record({"event": "drive_download_probe_ok", "session": session,
                         "run_id": args.run_id,
                         "probe_file_id": drive_download["probe"]["file_id"]})
+                # TASK-006 P1-A: worker-side durable upload. Pre-create
+                # the run folder, mint the least-privilege drive.file
+                # token, and upload the stdlib uploader module. Any
+                # failure here is fail-soft: the worker simply gets no
+                # drive_upload block and the run falls back to the
+                # controller-side download + idempotent delivery.
+                try:
+                    drive_upload = _build_drive_upload_block(args.run_id, variant)
+                    import h3_drive_token
+
+                    _mint_and_upload_drive_token(
+                        session, run_dir, "drive_upload_token.json",
+                        mint_fn=h3_drive_token.mint_file_token)
+                    run_cli(["upload", "-s", session, str(ROOT / "h3_drive_upload.py"),
+                             REMOTE + "/h3_drive_upload.py"], timeout=120)
+                    record({"event": "drive_upload_block_ready", "session": session,
+                            "run_id": args.run_id,
+                            "folder_id": drive_upload["folder_id"]})
+                except Exception as e:  # noqa: BLE001 - fail-soft to controller delivery
+                    drive_upload = None
+                    record({"event": "drive_upload_block_failed", "session": session,
+                            "run_id": args.run_id, "error_type": type(e).__name__,
+                            "error": str(e)[:300]})
             # Worker files go up only after the cache probe passed:
             # the probe must run before the remote worker that does H3
             # inference (and the test in test_auth_and_transport enforces
@@ -2097,6 +2264,11 @@ def run_variant(args) -> dict:
                 # download staging dir for the worker's path handling.
                 task["drive_cache_dir"] = drive_download["dest_dir"]
                 task["drive_download"] = drive_download
+                # TASK-006 P1-A: the worker uploads the finished MP4
+                # itself when this block is present; absent, the run
+                # falls back to controller-side delivery.
+                if drive_upload is not None:
+                    task["drive_upload"] = drive_upload
             task_path = RUNS / f"task_{session}.json"
             task_path.write_text(json.dumps(task))
             run_cli(["upload", "-s", session, str(task_path), REMOTE + "/task.json"], timeout=120)
@@ -2125,6 +2297,14 @@ def run_variant(args) -> dict:
             _manifest_update(args.run_id, task_state="INFERENCE_COMPLETED",
                              last_verified_stage="INFERENCE_COMPLETED",
                              artifacts={"delivery_state": "TEMPORARY"})
+            # TASK-006 P1-A: record AFTER the TEMPORARY update, so a
+            # worker upload is not clobbered back to TEMPORARY by it.
+            # The tail re-verifies the recorded Drive id server-side
+            # against the local MP4 before marking DRIVE_VERIFIED, so
+            # a worker upload never skips the controller's independent
+            # verification. Absent evidence means the controller-side
+            # fallback delivers instead.
+            _record_remote_upload(args.run_id, worker_state)
             record({"event": "delivery_state", "variant": variant, "run_id": args.run_id, "state": "INFERENCE_COMPLETED"})
             # Independent remote verification of the real MP4 BEFORE any
             # download: the file must exist and ffprobe must read exactly

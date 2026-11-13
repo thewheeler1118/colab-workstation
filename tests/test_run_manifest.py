@@ -174,6 +174,9 @@ class ResumeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             self._to_state(root, "DRIVE_VERIFIED")
+            # TASK-006 P1-A: TASK_COMPLETED also requires a confirmed
+            # STOPPED session; a bare DRIVE_VERIFIED no longer completes.
+            rm.update_run(root, RUN_ID, session_state="STOPPED")
             rm.update_run(root, RUN_ID, task_state="TASK_COMPLETED")
             view = rm.resume_run(root, RUN_ID)
             self.assertFalse(view["resumable"])
@@ -231,6 +234,117 @@ class StatusActionTest(unittest.TestCase):
             with mock.patch.object(hc, "ROOT", root):
                 with self.assertRaises(FileNotFoundError):
                     hc.test_or_run(args)
+
+
+class MigrationTest(unittest.TestCase):
+    """TASK-006 P1-A (Issue #48): schema v2 + DRIVE_VERIFIED before
+    GPU_STOP_CONFIRMED + TASK_COMPLETED requires a STOPPED session."""
+
+    def test_new_manifest_is_schema_v2(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            m = _create(root)
+            self.assertEqual(m["schema_version"], 2)
+            self.assertEqual(rm.manifest_schema_version(m), 2)
+
+    def test_v1_manifest_loads_with_safe_defaults(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            m = _create(root)
+            del m["schema_version"]
+            (rm.manifest_dir(root) / f"{RUN_ID}.json").write_text(
+                json.dumps(m))
+            loaded = rm.load_run_manifest(root, RUN_ID)
+            self.assertEqual(rm.manifest_schema_version(loaded), 1)
+            view = rm.recovery_view(root, RUN_ID)
+            self.assertEqual(view["schema_version"], 1)
+            self.assertFalse(view["drive_verified_before_stop"])
+            self.assertIsNone(view["remote_upload"])
+            self.assertIsNone(view["delivery_state"])
+
+    def test_drive_verified_before_stop_is_recorded_honestly(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            _create(root)
+            rm.update_run(root, RUN_ID, task_state="GPU_ALLOCATED",
+                          session_state="ACTIVE")
+            m, applied, anomaly = rm.update_run(
+                root, RUN_ID, task_state="DRIVE_VERIFIED")
+            self.assertTrue(applied)
+            self.assertIsNone(anomaly)
+            self.assertTrue(m["artifacts"]["drive_verified_before_stop"])
+            events = [e["event"] for e in rm.read_audit_log(root, RUN_ID)]
+            self.assertIn("DRIVE_VERIFIED_BEFORE_STOP", events)
+            view = rm.recovery_view(root, RUN_ID)
+            self.assertTrue(view["drive_verified_before_stop"])
+            self.assertIn("before GPU stop", view["reason"])
+
+    def test_drive_verified_after_stop_sets_no_flag(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            _create(root)
+            rm.update_run(root, RUN_ID, task_state="GPU_ALLOCATED",
+                          session_state="STOPPED")
+            m, _, _ = rm.update_run(root, RUN_ID, task_state="DRIVE_VERIFIED")
+            self.assertNotIn("drive_verified_before_stop", m["artifacts"])
+            events = [e["event"] for e in rm.read_audit_log(root, RUN_ID)]
+            self.assertNotIn("DRIVE_VERIFIED_BEFORE_STOP", events)
+
+    def test_completed_refused_while_session_active(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            _create(root)
+            rm.update_run(root, RUN_ID, task_state="DRIVE_VERIFIED",
+                          session_state="ACTIVE")
+            m, applied, anomaly = rm.update_run(
+                root, RUN_ID, task_state="TASK_COMPLETED")
+            self.assertFalse(applied)
+            self.assertIn("not STOPPED", anomaly)
+            self.assertEqual(m["task_state"], "DRIVE_VERIFIED")
+
+    def test_completed_passes_with_stop_in_the_same_call(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            _create(root)
+            rm.update_run(root, RUN_ID, task_state="DRIVE_VERIFIED",
+                          session_state="ACTIVE")
+            m, applied, anomaly = rm.update_run(
+                root, RUN_ID, task_state="TASK_COMPLETED",
+                session_state="STOPPED")
+            self.assertTrue(applied)
+            self.assertIsNone(anomaly)
+            self.assertEqual(m["task_state"], "TASK_COMPLETED")
+            self.assertEqual(m["session_state"], "STOPPED")
+
+    def test_delivery_state_never_moves_backward(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            _create(root)
+            rm.update_run(root, RUN_ID, artifacts={
+                "delivery_state": "REMOTE_UPLOAD_VERIFIED",
+                "drive_file_id": "drive-file-7"})
+            m, applied, anomaly = rm.update_run(
+                root, RUN_ID, artifacts={"delivery_state": "TEMPORARY"})
+            # The backward move is refused: the recorded state stays
+            # REMOTE_UPLOAD_VERIFIED and an anomaly is logged.
+            self.assertEqual(m["artifacts"]["delivery_state"],
+                             "REMOTE_UPLOAD_VERIFIED")
+            self.assertEqual(m["artifacts"]["drive_file_id"], "drive-file-7")
+            events = [e for e in rm.read_audit_log(root, RUN_ID)
+                      if e["event"] == "ANOMALY"]
+            self.assertTrue(any("REMOTE_UPLOAD_VERIFIED -> TEMPORARY" in
+                                e["detail"]["detail"] for e in events))
+
+    def test_delivery_state_moves_forward(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            _create(root)
+            rm.update_run(root, RUN_ID, artifacts={"delivery_state": "TEMPORARY"})
+            m, applied, _ = rm.update_run(
+                root, RUN_ID, artifacts={"delivery_state": "REMOTE_UPLOAD_VERIFIED"})
+            self.assertTrue(applied)
+            self.assertEqual(m["artifacts"]["delivery_state"],
+                             "REMOTE_UPLOAD_VERIFIED")
 
 
 if __name__ == "__main__":

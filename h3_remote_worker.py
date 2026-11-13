@@ -6,12 +6,12 @@ cache manifest.
 Must NOT be considered production-verified until ComfyUI API workflow is exported/validated.
 """
 from __future__ import annotations
-import hashlib,json,os,re,shutil,subprocess,sys,tarfile,tempfile,time,urllib.request,urllib.error,uuid
+import base64,hashlib,json,os,re,shutil,subprocess,sys,tarfile,tempfile,time,urllib.request,urllib.error,uuid
 from pathlib import Path
 
 ROOT=Path('/content/muse_h3')
 sys.path.insert(0,str(ROOT))
-from h3_contract import MODEL_FILES,validate_model_cache_manifest,sha256_file,patch_api_workflow,WIDTH,HEIGHT,ANIMATION_FRAMES,FPS
+from h3_contract import MODEL_FILES,validate_model_cache_manifest,sha256_file,patch_api_workflow,WIDTH,HEIGHT,ANIMATION_FRAMES,FPS,TOTAL_FRAMES
 from h3_job_state import WORKER_PHASE_TO_JOB_STAGE, write_job_state
 from assemble import run as assemble_video,ffprobe
 
@@ -38,12 +38,14 @@ _JOB_VARIANT = ""
 _LAST_REFRESH_REQUEST_TOKEN_ID = None
 
 
-def _request_token_refresh(provider) -> None:
+def _request_token_refresh(provider, scope="drive.readonly") -> None:
     """Ask the controller (through the durable job state) for a fresh
     short-lived Drive token. Best-effort and throttled: one request per
     token id. The controller uploads a new 0600 token file; the
     provider picks it up on its next get_token() call. Never carries
-    a token value, only the token id."""
+    a token value, only the token id. The scope tells the controller
+    which token to mint (drive.readonly for downloads, drive.file for
+    the P1-A worker upload) and which remote file to replace."""
     global _LAST_REFRESH_REQUEST_TOKEN_ID
     try:
         token_id = provider.token_id if provider is not None else None
@@ -55,9 +57,10 @@ def _request_token_refresh(provider) -> None:
                             WORKER_PHASE_TO_JOB_STAGE.get(_LAST_STAGE, _LAST_STAGE),
                             extra={"token_refresh_requested": {
                                 "token_id": token_id,
+                                "scope": scope,
                                 "requested_at_utc": time.strftime(
                                     "%Y-%m-%dT%H:%M:%SZ", time.gmtime())}})
-            print("TOKEN_REFRESH_REQUESTED", token_id, flush=True)
+            print("TOKEN_REFRESH_REQUESTED", token_id, scope, flush=True)
     except Exception:
         pass
 
@@ -843,6 +846,99 @@ def rescue_rendered_video(comfy, run_id, variant, remaining_budget_seconds, prob
     raise RuntimeError(f'Rescue found no verifiable video for run {run_id} variant {variant} '
                        f'(scanned {len(matches)} name-matching files)')
 
+def _md5_b64(path) -> str:
+    h = hashlib.md5()
+    with open(path, "rb") as fp:
+        for chunk in iter(lambda: fp.read(4 * 1024 * 1024), b""):
+            h.update(chunk)
+    return base64.b64encode(h.digest()).decode("ascii")
+
+
+def validate_assembled_mp4(final, info) -> dict:
+    """Independent worker-side validation of the assembled MP4 before
+    upload (TASK-006 P1-A): exact frames/fps/dimensions + one decoded
+    frame + SHA-256 agreement with the assemble info. Raises on any
+    mismatch; a failed validation is never uploaded."""
+    final = Path(final)
+    if not final.is_file():
+        raise ValueError(f"assembled MP4 missing: {final}")
+    probe = ffprobe(final)
+    streams = probe.get("streams", [])
+    vid = next((x for x in streams if x.get("codec_type") == "video"), None)
+    if not vid:
+        raise ValueError("assembled MP4 has no video stream")
+    frames = int(vid.get("nb_read_frames") or vid.get("nb_frames") or 0)
+    if frames != TOTAL_FRAMES:
+        raise ValueError(f"assembled MP4 has {frames} frames, expected {TOTAL_FRAMES}")
+    fps_raw = str(vid.get("r_frame_rate") or vid.get("avg_frame_rate") or "")
+    try:
+        num, den = (int(x) for x in fps_raw.split("/"))
+        fps_val = num / den if den else 0
+    except (ValueError, ZeroDivisionError):
+        fps_val = 0
+    if abs(fps_val - FPS) > 0.01:
+        raise ValueError(f"assembled MP4 fps {fps_raw}, expected {FPS}")
+    # The final video is 1080x1920 (WIDTH/HEIGHT in h3_contract are the
+    # 736x1312 model resolution, not the assembled output).
+    if int(vid.get("width") or 0) != 1080 or int(vid.get("height") or 0) != 1920:
+        raise ValueError(f"assembled MP4 is {vid.get('width')}x{vid.get('height')}, expected 1080x1920")
+    # Decodable: one frame through the decoder.
+    subprocess.run(["ffmpeg", "-v", "error", "-i", str(final),
+                    "-frames:v", "1", "-f", "null", "-"],
+                   check=True, timeout=120, capture_output=True)
+    sha = sha256_file(final)
+    if info.get("sha256") and sha.lower() != str(info["sha256"]).lower():
+        raise ValueError("assembled MP4 SHA-256 does not match assemble info")
+    return {"sha256": sha, "md5": _md5_b64(final), "frames": frames}
+
+
+def upload_remote_archive(final, info, task, run_id, version):
+    """Validate + resumably upload the assembled MP4 from the worker
+    (TASK-006 P1-A). Returns the evidence dict, or None when no
+    drive_upload block was delivered (mount path / legacy runs).
+    Raises on validation, upload or verification failure — the caller
+    records REMOTE_UPLOAD_FAILED and continues with the controller-side
+    fallback; inference is never re-run because an upload failed."""
+    block = task.get("drive_upload")
+    if not isinstance(block, dict):
+        return None
+    folder_id = block.get("folder_id")
+    file_name = block.get("file_name") or f"{version}.mp4"
+    if not folder_id:
+        raise ValueError("drive_upload block has no folder_id")
+    from h3_drive_upload import DriveUploader, FileTokenProvider
+
+    validated = validate_assembled_mp4(final, info)
+    upload_provider = FileTokenProvider(ROOT / "drive_upload_token.json")
+    upload_provider.load_initial()
+    started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    uploader = DriveUploader(upload_provider)
+    evidence = uploader.upload_file(
+        final, folder_id, file_name, run_id, version,
+        validated["sha256"],
+        sidecar_path=ROOT / "output" / f"{version}.upload_state.json",
+        on_token_expiring=lambda tid, rem: _request_token_refresh(
+            upload_provider, scope="drive.file"))
+    finished_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    verified = uploader.verify_uploaded(
+        evidence["drive_file_id"], evidence["size"], evidence["sha256"],
+        expected_md5=validated["md5"], parent_id=folder_id)
+    return {
+        "drive_file_id": evidence["drive_file_id"],
+        "size": evidence["size"],
+        "sha256": evidence["sha256"],
+        "md5": validated["md5"],
+        "uploaded_by": "worker",
+        "verified_by": "worker_readback",
+        "upload_started_at_utc": started_at,
+        "upload_finished_at_utc": finished_at,
+        "reused": bool(evidence.get("reused")),
+        "reused_via": evidence.get("reused_via"),
+        "drive_output_folder_id": folder_id,
+        "read_back_bytes": verified.get("read_back_bytes"),
+    }
+
+
 def main():
     task=json.loads((ROOT/'task.json').read_text())
     version=task['variant']
@@ -928,11 +1024,30 @@ def main():
         # 'frame_count' key printed None here (TASK-003 §3).
         print('MP4_WRITTEN',str(final),final.stat().st_size,info.get('frames'),flush=True)
         (ROOT/'output'/f'{version}.json').write_text(json.dumps(info,ensure_ascii=False,indent=2))
+        # TASK-006 P1-A: worker-side durable upload. A failure here never
+        # fails the run: the MP4 is valid locally and the controller falls
+        # back to its own download + idempotent delivery. Inference is
+        # never re-run because an upload failed.
+        remote_upload=None
+        if task.get('drive_upload') is not None:
+            set_stage('remote_upload')
+            try:
+                remote_upload=upload_remote_archive(final,info,task,run_id,version)
+            except Exception as e:
+                try:write_job_state(ROOT,run_id,version,'REMOTE_UPLOAD_FAILED',extra={'remote_upload_failed':{'error_type':type(e).__name__,'error':str(e)[:300]}})
+                except Exception:pass
+                print('REMOTE_UPLOAD_FAILED_JSON:'+json.dumps({'error_type':type(e).__name__,'error':str(e)[:300]},ensure_ascii=False),flush=True)
+        if remote_upload is not None:
+            try:write_job_state(ROOT,run_id,version,'REMOTE_UPLOAD_VERIFIED',extra={'remote_upload':remote_upload})
+            except Exception:pass
+            print('REMOTE_UPLOAD_JSON:'+json.dumps(remote_upload,ensure_ascii=False),flush=True)
         set_stage('done')
         # VIDEO_READY carries the same done info as MUSE_H3_DONE_JSON, so
         # a resumed controller can complete the run from the state file
-        # without re-reading the worker's stdout (TASK-005 §4.2).
-        try:write_job_state(ROOT,run_id,version,'VIDEO_READY',output=info)
+        # without re-reading the worker's stdout (TASK-005 §4.2). The
+        # remote-upload evidence travels with it (TASK-006 P1-A) so the
+        # controller can record + re-verify it without parsing stdout.
+        try:write_job_state(ROOT,run_id,version,'VIDEO_READY',output=info,extra={'remote_upload':remote_upload} if remote_upload is not None else None)
         except Exception:pass
         print('MUSE_H3_DONE_JSON:'+json.dumps(info,ensure_ascii=False),flush=True)
     except Exception as e:

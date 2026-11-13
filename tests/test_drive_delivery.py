@@ -20,6 +20,7 @@ test_or_run: it re-validates the local MP4 and calls the deliver helper
 with no GPU involved.
 """
 import hashlib
+import json
 import sys
 import tempfile
 import unittest
@@ -377,6 +378,45 @@ class RunVariantDeliveryTest(unittest.TestCase):
                                   "INFERENCE_COMPLETED", "VIDEO_VALIDATED",
                                   "ARTIFACT_DURABLE", "GPU_STOP_CONFIRMED",
                                   "DRIVE_VERIFIED", "TASK_COMPLETED"])
+
+    def test_worker_remote_upload_survives_temporary_state(self):
+        # TASK-006 P1-A: when the worker reports a verified remote
+        # upload, the manifest must keep the remote-upload evidence
+        # (drive_file_id, drive_verified_before_stop, upload wall time)
+        # and task.json must carry the drive_upload block. The tail
+        # still calls the idempotent deliver: it re-verifies the
+        # recorded id server-side, it does not skip verification.
+        self.patchers["wait_for_worker"].stop()
+        self.patches.remove(self.patchers["wait_for_worker"])
+        evidence = {"drive_file_id": "drive-file-7", "size": 1234,
+                    "sha256": self.sha, "md5": "AAAA",
+                    "uploaded_by": "worker", "verified_by": "worker_readback",
+                    "upload_started_at_utc": "2026-11-12T08:00:00Z",
+                    "upload_finished_at_utc": "2026-11-12T08:01:00Z",
+                    "reused": False, "reused_via": None,
+                    "drive_output_folder_id": "folder-9",
+                    "read_back_bytes": 1234}
+        self._po(hc, "wait_for_worker",
+                 return_value={"run_id": RUN_ID, "variant": "A",
+                               "stage": "VIDEO_READY",
+                               "output": {"file": "/content/muse_h3/output/shao_nian_h3_A.mp4",
+                                          "frames": 274, "sha256": self.sha,
+                                          "seconds": 274 / 24, "with_audio": True},
+                               "remote_upload": evidence})
+        self._po(hc, "_build_drive_upload_block",
+                 return_value={"folder_id": "folder-9", "file_name": "A.mp4",
+                               "run_id": RUN_ID, "variant": "A"})
+        result = hc.run_variant(_args())
+        self.assertEqual(len(self._deliver_calls()), 1)
+        self.assertEqual(result["delivery"]["drive_file_id"], "drive-file-1")
+        manifest, _audit = self._manifest()
+        self.assertEqual(manifest["artifacts"]["remote_upload"]["drive_file_id"],
+                         "drive-file-7")
+        self.assertTrue(manifest["artifacts"]["drive_verified_before_stop"])
+        self.assertEqual(manifest["artifacts"]["upload_wall_seconds"], 60.0)
+        task = json.loads((self.runs_root / f"task_{SESSION}.json").read_text())
+        self.assertEqual(task["drive_upload"]["folder_id"], "folder-9")
+        self.assertEqual(task["drive_upload"]["file_name"], "A.mp4")
 
     def test_stop_not_confirmed_skips_delivery_and_fails(self):
         self.stop_ok = False

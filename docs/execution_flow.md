@@ -29,19 +29,22 @@ search for in `logs/<run_id>/` and remote stdout.
 | 16 | VIDEO_LOCATED | `h3_remote_worker.find_rendered_video` | File exists under `ComfyUI/output/`, suffix `.mp4`/`.webm`/`.mov`, size > 10000 (reads `videos`/`gifs` always, `images` only when `animated` is truthy) | `RuntimeError: did not contain verifiable saved video` (history keys included in the message) | No retry; no RUN_ID-prefix fallback (see P0 issue) | `tests/test_savevideo_history.py` (8 tests) | `WORKER_STAGE: assemble_mp4` |
 | 17 | VIDEO_DOWNLOADED | `h3_controller.download_and_validate_variant` → `run_cli` (`colab download`, timeout 600s) + `h3_video_qa.validate_final_video` | Local MP4 ffprobe-reads exactly 274 frames, 24 fps, 1080x1920 | Any mismatch → failure (no success report) | Download 600s; metadata JSON download best-effort (120s) | `tests/test_h3_production.py` (download/validate) | `version_downloaded`, `MUSE_H3_DONE_JSON` |
 | 18 | VIDEO_QA_PASSED | Remote `h3_output_check.py` → `OUTPUT_CHECK_JSON` + `h3_controller.check_remote_output` (before download); local `h3_video_qa.validate_final_video` + `compare_poster_tail` (poster-tail PSNR ≥ 30 dB) | Remote: `ok=true`, 274 frames, 24 fps, 1080x1920. Local: same + poster-tail PSNR | `OUTPUT_CHECK_JSON ok=false` → fail-closed, no download | Output check exec 180s; ffprobe 120s | `tests/test_h3_production.py` | `OUTPUT_CHECK_JSON:{"ok": true, ...}`, `MP4_WRITTEN` |
-| 19 | DRIVE_OUTPUT_VERIFIED | `h3_controller.archive_variant_to_drive` + `check_archive_metadata` | MP4 uploaded to `Muse-H3-Video-Outputs/<RUN_ID>/`, server metadata re-queried, parent == run folder, not trashed | Parent/trash check fails → RuntimeError | — | (none on file) | **UNVERIFIED — see note below** |
+| 19 | DRIVE_OUTPUT_VERIFIED | Two paths (TASK-006 P1-A, Issue #48). **Worker path (first):** `h3_remote_worker.upload_remote_archive` → `h3_drive_upload.DriveUploader` (resumable upload + metadata + full read-back verify) into the pre-created `Muse-H3-Video-Outputs/<RUN_ID>/`, evidence recorded by `h3_controller._record_remote_upload`. **Controller path (fallback, or reuse):** `h3_controller.deliver_variant_to_drive_idempotent` → `deliver_variant_to_drive` → `archive_variant_to_drive` + `check_archive_metadata`; a manifest-recorded Drive id is server-verified against the local MP4 before reuse, never silently re-uploaded | Worker: MP4 validated (274f/24fps/1080x1920/decodable) then uploaded + verified (size + MD5 + read-back SHA-256). Controller: MP4 in `Muse-H3-Video-Outputs/<RUN_ID>/`, server metadata re-queried, parent == run folder, not trashed | Worker upload failure → `REMOTE_UPLOAD_FAILED`, controller fallback delivers. Parent/trash check fails → RuntimeError | Worker upload bounded (4 attempts, backoff); controller deliver bounded (3 attempts) | `tests/test_drive_upload.py` (offline simulator: reconcile, resume, response-loss, conflict, auth); `tests/test_durable_artifact_delivery.py` (idempotent deliver) | `REMOTE_UPLOAD_JSON`, `remote_upload_verified`, `DELIVERY_COMPLETED` |
 | — | GPU_STOP_VERIFIED | `h3_controller.stop_and_verify_session` (+ `h3_session_watchdog.stop_session`, 3 attempts) in `run_variant`'s `finally` | Session confirmed gone; `mark_session_stopped`; `sessions == []` and rate 0 on re-check | `Stop not verified; run FAILED regardless of generated files` | Stop attempts: 3 × (`stop` 65s + 3s re-check) | `tests/test_h3_mount_repair.py::test_session_cleanup_verified` | `finished` event with `stop_verified: true` |
 
-## UNVERIFIED stage note
+## Stage 19 note (updated TASK-006 P1-A, Issue #48)
 
-**DRIVE_OUTPUT_VERIFIED (stage 19): `archive_variant_to_drive` is defined
-in `h3_controller.py` but has no call site in `run_variant`** (verified by
-grep: only the definition exists). The function itself is sound — it
-uploads to `Muse-H3-Video-Outputs/<RUN_ID>/` and re-queries server
-metadata via `check_archive_metadata` — but the live flow never invokes
-it, so Drive delivery is NOT verified by the current production run.
-Do not claim otherwise. See `docs/incidents/24-drive-output-not-server-verified.md`
-and `docs/issues/p0-persist-mp4-before-shutdown.md`.
+The earlier UNVERIFIED note is superseded: `archive_variant_to_drive`
+is invoked via `deliver_variant_to_drive_idempotent` in `run_variant`'s
+tail and in `_resume_finish`, and the worker-side upload path
+(`upload_remote_archive` + `h3_drive_upload.py`) now delivers first,
+with the controller re-verifying the recorded Drive id server-side
+against the locally validated MP4 before marking DRIVE_VERIFIED. What
+is still NOT live-verified: no real GPU run has exercised either path
+end to end (the worker upload, the `drive.file` write into the
+pre-created folder, and the recorded-id reuse all remain
+offline-verified only). See `docs/state-machine-migration-p1a.md` and
+`docs/incidents/24-drive-output-not-server-verified.md`.
 
 ## Pre-stage gates (before any GPU)
 

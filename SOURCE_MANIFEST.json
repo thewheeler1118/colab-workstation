@@ -191,8 +191,8 @@
     },
     {
       "path": "docs/execution_flow.md",
-      "size_bytes": 11644,
-      "sha256": "b8a17036c6369be58c9475b53b5afac593818edf68d816996c8d63b642695c76",
+      "size_bytes": 12829,
+      "sha256": "41440b3fb6b014e9da5d0181643ef3e84096ed9a04f3c1cbb1ed5aa16b20af50",
       "role": "Documentation / evidence"
     },
     {
@@ -413,8 +413,8 @@
     },
     {
       "path": "docs/module_inventory.md",
-      "size_bytes": 42960,
-      "sha256": "bdbae4235306cc0bbbfe3320d8d849cd58dba887dec0dc98ee78d84b42e46345",
+      "size_bytes": 45065,
+      "sha256": "d31e5e523c6723718d49c47f61b5c9cce42b24eb4abe93ed538d16b26cb33d87",
       "role": "Module inventory (this table's source of truth for hashes)"
     },
     {
@@ -475,6 +475,12 @@
       "path": "docs/runbooks/vm-restart-orphan-recovery.md",
       "size_bytes": 1628,
       "sha256": "dfd909e6a8cab46ed65f02e5e8e6dd473716f8334f32227a05d3724bd9f1e7ff",
+      "role": "Documentation / evidence"
+    },
+    {
+      "path": "docs/state-machine-migration-p1a.md",
+      "size_bytes": 13272,
+      "sha256": "5620d35807193d1ab09fea7eefeddad7ba938cd71f69211332c01ac9ea66fca8",
       "role": "Documentation / evidence"
     },
     {
@@ -563,8 +569,8 @@
     },
     {
       "path": "h3_controller.py",
-      "size_bytes": 126025,
-      "sha256": "d1a6de346026f62b14cdee462fad498902dda4af4c1f7ab1bf46aae3107f2b2b",
+      "size_bytes": 136034,
+      "sha256": "659f758090ee71b2a593d250409b2a5f3d602dede492aea2f7d8c689917a1ed2",
       "role": "Run orchestration: preflight, allocation, mount, worker exec, download, stop"
     },
     {
@@ -587,14 +593,20 @@
     },
     {
       "path": "h3_drive_token.py",
-      "size_bytes": 2993,
-      "sha256": "39068daaa6dd3ddc90edf018657571cf7d2aff268fd2d5cd61d76d056e97648b",
+      "size_bytes": 4546,
+      "sha256": "d82d42b6982fd1491a46dfefcb0d75e4e8fe880ca5054fdbe9c1def6f2754bb4",
       "role": "Supporting file"
     },
     {
       "path": "h3_drive_transport.py",
       "size_bytes": 5168,
       "sha256": "52b00c9a7248a6743b7ad7cfbbbec4597732b481394625eb0802c8371ceb71df",
+      "role": "Supporting file"
+    },
+    {
+      "path": "h3_drive_upload.py",
+      "size_bytes": 24816,
+      "sha256": "2a3bcd8fdc222b67f5a1d0c1499f214141eb04495d7f743272c6d2f05c1d759c",
       "role": "Supporting file"
     },
     {
@@ -629,8 +641,8 @@
     },
     {
       "path": "h3_job_state.py",
-      "size_bytes": 4165,
-      "sha256": "8dc508199d3d75e79bcc2b5e24a3afbfd0823fd5eff4d0f6b7090cc2e3c43dc4",
+      "size_bytes": 4577,
+      "sha256": "e5c7a1c9a952270b584826e79761a8199d0e36e0702b5dfed932624ecc943920",
       "role": "Supporting file"
     },
     {
@@ -665,8 +677,8 @@
     },
     {
       "path": "h3_remote_worker.py",
-      "size_bytes": 49333,
-      "sha256": "3051f371ef32783ad6380291f8120e244472f5870c46c55c1d54895ee5fd4dc2",
+      "size_bytes": 55398,
+      "sha256": "fdce764ea5e0cf32258f395ab5a926b5a1d7a7655630dd1b43fc4848b991ec21",
       "role": "Remote ComfyUI worker: restore, inference, find_rendered_video, assemble"
     },
     {
@@ -677,8 +689,8 @@
     },
     {
       "path": "h3_run_manifest.py",
-      "size_bytes": 13331,
-      "sha256": "991163339c063e4d0d6b6d35d86ab1b71656df283a9c10f99572494467a94bf8",
+      "size_bytes": 18912,
+      "sha256": "da8078fdeaebfb6748f09d45fe35389fc2cbb4ab4840faf2e38b0e87660ac36e",
       "role": "Supporting file"
     },
     {
@@ -941,8 +953,8 @@
     },
     {
       "path": "tests/test_drive_delivery.py",
-      "size_bytes": 24767,
-      "sha256": "9f615942133682fb4baecebede36b59e3150d0792741416d5b7212c19bd6977f",
+      "size_bytes": 27250,
+      "sha256": "6f5f2b26c942a888ae36af4a89a92064ee126069f99b767056bcb87d39aab4f7",
       "role": "Tests"
     },
     {
@@ -967,6 +979,12 @@
       "path": "tests/test_drive_transport.py",
       "size_bytes": 11248,
       "sha256": "7c5b9c4c3b009b626d6504d4eaca2e6998e367e0f7c8a6c8587ccd00a89d5c6b",
+      "role": "Tests"
+    },
+    {
+      "path": "tests/test_drive_upload.py",
+      "size_bytes": 30046,
+      "sha256": "b1a82b31fc884d05e2000da749eba0cd62fc2307a01eb67beb6c82b526d4925b",
       "role": "Tests"
     },
     {
@@ -1019,8 +1037,8 @@
     },
     {
       "path": "tests/test_recoverable_controller.py",
-      "size_bytes": 30377,
-      "sha256": "434dea407955e3073b9de26a911ebe947004c12ddf72f168089c46033b753ae1",
+      "size_bytes": 31555,
+      "sha256": "42e2d32039be5d11baf2e993ec981ededc29325b2dc11197b2e125390ecba55c",
       "role": "Tests"
     },
     {
@@ -1031,8 +1049,8 @@
     },
     {
       "path": "tests/test_run_manifest.py",
-      "size_bytes": 10289,
-      "sha256": "29e7f118d48e82ea78cfa1928217d91bcf275d78ae630859824360967653e101",
+      "size_bytes": 15812,
+      "sha256": "669d1f69a2b201cce6dab383f47ba82c0d5c0b87d64885744a4253d4b1058a7c",
       "role": "Tests"
     },
     {
