@@ -11,9 +11,29 @@ from pathlib import Path
 
 ROOT=Path('/content/muse_h3')
 sys.path.insert(0,str(ROOT))
-from h3_contract import MODEL_FILES,validate_model_cache_manifest,sha256_file,patch_api_workflow,WIDTH,HEIGHT,ANIMATION_FRAMES,FPS,TOTAL_FRAMES
+from h3_contract import MODEL_FILES,validate_model_cache_manifest,sha256_file,patch_api_workflow_for_spec,validate_ref_image,WIDTH,HEIGHT,ANIMATION_FRAMES,FPS,TOTAL_FRAMES
 from h3_job_state import WORKER_PHASE_TO_JOB_STAGE, write_job_state
 from assemble import run as assemble_video,ffprobe
+
+
+def _spec_from_task(task):
+    """Resolve the TaskSpec for this worker invocation (TASK-007).
+
+    The controller always writes task['task_spec'] (a TaskSpec dict).
+    A legacy task.json with only task['variant'] in A/B falls back to
+    the built-in fixture adapter bound to the uploaded poster.jpg.
+    Anything else is a hard failure: the worker never guesses a prompt
+    or a frame count.
+    """
+    from h3_task_spec import TaskSpec, task_spec_for_variant
+
+    spec = task.get('task_spec')
+    if isinstance(spec, dict):
+        return TaskSpec.from_dict(spec)
+    version = task.get('variant')
+    if version in ('A', 'B'):
+        return task_spec_for_variant(version, task.get('production_task_id', 'legacy'), ROOT / 'poster.jpg')
+    raise ValueError('task.json carries neither task_spec nor a known variant')
 
 # ---- Worker stage tracking (user requirement 2026-11-11 09:12) ----
 # Every phase prints a WORKER_STAGE marker, so the controller's persisted
@@ -515,11 +535,17 @@ def restore_weights(comfy:Path,cache:Path,manifest:dict,rate_cu_h=None,budget_cu
             if not entry or not entry.get('file_id'):
                 raise RuntimeError('Drive download entry missing for '+str(relative))
             copy_start=time.monotonic()
+            # Per-file milestone: done is cumulative within this file
+            # and may land on non-multiples of 256 MiB (8 MiB chunks,
+            # concurrent shards, or a resumed offset). The milestone
+            # only ever advances, so a dip can never re-fire it.
+            next_milestone=[256*1024*1024]
             downloader.download_file(
                 entry['file_id'], int(item['size']), item['sha256'], dst,
                 expected_md5=item.get('server_md5'),
                 on_progress=lambda done, total_bytes, rel=relative: _download_progress(
-                    rel, done, total, copy_start, projected, rate_cu_h, budget_cu),
+                    rel, done, total, copy_start, projected, rate_cu_h, budget_cu,
+                    next_milestone),
                 on_token_expiring=lambda tid, rem: _request_token_refresh(token_provider))
             print('CACHE_VERIFIED_NVME',relative,flush=True)
         return
@@ -558,14 +584,22 @@ def restore_weights(comfy:Path,cache:Path,manifest:dict,rate_cu_h=None,budget_cu
         print('CACHE_VERIFIED_NVME',relative,flush=True)
 
 
-def _download_progress(relative, done, grand_total, copy_start, projected, rate_cu_h, budget_cu):
+def _download_progress(relative, done, grand_total, copy_start, projected, rate_cu_h, budget_cu, next_milestone=None):
     """Progress hook for the noninteractive download path: periodic
     throughput projection (same once-only rule as the mounted-copy
     path: grand total projected from the current file's measured rate)
     without ever touching token material. ``projected`` is a
-    one-element list so the once-only flag survives the callback."""
-    if done % (256 * 1024 * 1024) == 0:
+    one-element list so the once-only flag survives the callback;
+    ``next_milestone`` is a one-element list holding the next 256 MiB
+    boundary to report at. The old ``done % (256 MiB) == 0`` test
+    silently skipped the projection whenever a chunk boundary or a
+    resume offset landed off a multiple; the monotonic threshold
+    fires exactly once per boundary crossed, at any chunk size."""
+    if next_milestone is None:
+        next_milestone = [256 * 1024 * 1024]
+    if done >= next_milestone[0]:
         print('MODEL_COPY_PROGRESS', relative, done, flush=True)
+        next_milestone[0] = (done // (256 * 1024 * 1024) + 1) * (256 * 1024 * 1024)
         if not projected[0]:
             projected[0] = True
             project_restore_throughput(grand_total, done, time.monotonic() - copy_start,
@@ -668,22 +702,27 @@ def execute_prompt(server,api:dict,timeout_sec:float):
 
 VIDEO_SUFFIXES = ('.mp4', '.webm', '.mov')
 
-# Raw animation the worker must locate: pinned production constants.
-# The ffprobe gate below requires the container to decode fully
-# (-count_frames), a video stream, exactly ANIMATION_FRAMES frames at FPS
-# and WIDTH x HEIGHT. Those are the contract values assemble.py already
-# enforces downstream; the gate fails fast here, with the observed value
-# in the error, instead of letting a wrong file reach assembly. If a
-# future live run shows ComfyUI writing a different container fps, the
-# gate fails closed naming it — correct the constant with that evidence,
-# never by weakening the gate to suffix+size.
+# Raw animation the worker must locate: the TaskSpec's animation shape
+# (animation frames at fps and width x height). The ffprobe gate below
+# requires the container to decode fully (-count_frames), a video
+# stream, exactly that many frames at that fps and size. Those are the
+# spec values assemble.py already enforces downstream; the gate fails
+# fast here, with the observed value in the error, instead of letting a
+# wrong file reach assembly. With no spec the frozen A/B constants
+# apply. If a future live run shows ComfyUI writing a different
+# container fps, the gate fails closed naming it — correct the spec
+# with that evidence, never by weakening the gate to suffix+size.
 
 
-def probe_animation(path):
+def probe_animation(path, spec=None):
     """ffprobe decode gate for a raw animation file (full decode via
     assemble.ffprobe -count_frames). Returns probe evidence or raises
     RuntimeError naming the mismatch. A non-video blob fails here: ffprobe
     cannot parse it, so there is no video stream to measure."""
+    expected_frames = spec.animation_frames if spec is not None else ANIMATION_FRAMES
+    expected_fps = spec.fps if spec is not None else FPS
+    expected_width = spec.width if spec is not None else WIDTH
+    expected_height = spec.height if spec is not None else HEIGHT
     try:
         data = ffprobe(Path(path))
     except Exception as e:  # noqa: BLE001 - ffprobe errors are the verdict
@@ -700,12 +739,12 @@ def probe_animation(path):
             "width": int(video.get("width", 0)), "height": int(video.get("height", 0)),
             "codec": video.get("codec_name")}
     problems = []
-    if frames != ANIMATION_FRAMES:
-        problems.append(f"frames={frames}, expected {ANIMATION_FRAMES}")
-    if abs(fps - FPS) > 0.5:
-        problems.append(f"fps={fps}, expected {FPS}")
-    if info["width"] != WIDTH or info["height"] != HEIGHT:
-        problems.append(f"size={info['width']}x{info['height']}, expected {WIDTH}x{HEIGHT}")
+    if frames != expected_frames:
+        problems.append(f"frames={frames}, expected {expected_frames}")
+    if abs(fps - expected_fps) > 0.5:
+        problems.append(f"fps={fps}, expected {expected_fps}")
+    if info["width"] != expected_width or info["height"] != expected_height:
+        problems.append(f"size={info['width']}x{info['height']}, expected {expected_width}x{expected_height}")
     if problems:
         raise RuntimeError(f"Animation probe failed for {Path(path).name}: " + "; ".join(problems))
     return info
@@ -760,19 +799,20 @@ def _validate_candidate(p, comfy, probe):
         return None, str(e)[:300]
 
 
-def find_rendered_video(comfy, outputs, run_id="", variant="", probe=None):
+def find_rendered_video(comfy, outputs, run_id="", variant="", probe=None, spec=None):
     """Locate this run's rendered animation from /history outputs.
 
     Priority: history file records (videos/gifs, plus images when animated
     is truthy). Every candidate must pass suffix, size and the ffprobe
-    decode gate (probe_animation by default; inject a fake probe in tests
-    to exercise selection logic without encoding video). Exactly one valid
-    candidate wins; several valid candidates is AMBIGUITY, never "take the
-    first" — a stale file from another run must not be silently used.
+    decode gate (probe_animation by default, judged against the spec;
+    inject a fake probe in tests to exercise selection logic without
+    encoding video). Exactly one valid candidate wins; several valid
+    candidates is AMBIGUITY, never "take the first" — a stale file from
+    another run must not be silently used.
     Raises RuntimeError when nothing valid is found; the caller then runs
     rescue_rendered_video() before giving up.
     """
-    probe = probe or probe_animation
+    probe = probe or (lambda p: probe_animation(p, spec))
     candidates = _history_candidates(comfy, outputs, run_id, variant)
     valid = []
     rejected = []
@@ -792,7 +832,7 @@ def find_rendered_video(comfy, outputs, run_id="", variant="", probe=None):
                        + ('; rejected: ' + '; '.join(rejected) if rejected else ''))
 
 
-def rescue_rendered_video(comfy, run_id, variant, remaining_budget_seconds, probe=None):
+def rescue_rendered_video(comfy, run_id, variant, remaining_budget_seconds, probe=None, spec=None):
     """Bounded rescue when history cannot locate the video (TASK-002 §4.4).
 
     Read-only scan of ComfyUI/output/ for files whose name contains this
@@ -804,7 +844,7 @@ def rescue_rendered_video(comfy, run_id, variant, remaining_budget_seconds, prob
     past the session budget for a rescue. The caller's outer exec timeout
     remains the hard bound; this is the inner one.
     """
-    probe = probe or probe_animation
+    probe = probe or (lambda p: probe_animation(p, spec))
     if not run_id:
         raise RuntimeError('Rescue needs a run_id; refusing to guess which output belongs to this run')
     if remaining_budget_seconds is None or float(remaining_budget_seconds) <= 0:
@@ -854,11 +894,17 @@ def _md5_b64(path) -> str:
     return base64.b64encode(h.digest()).decode("ascii")
 
 
-def validate_assembled_mp4(final, info) -> dict:
+def validate_assembled_mp4(final, info, spec=None) -> dict:
     """Independent worker-side validation of the assembled MP4 before
     upload (TASK-006 P1-A): exact frames/fps/dimensions + one decoded
     frame + SHA-256 agreement with the assemble info. Raises on any
-    mismatch; a failed validation is never uploaded."""
+    mismatch; a failed validation is never uploaded. Expectations come
+    from the TaskSpec when given; without one the frozen A/B shape
+    (274 frames, 24 fps, 1080x1920) is expected, as before."""
+    expected_frames = spec.total_frames if spec is not None else TOTAL_FRAMES
+    expected_fps = spec.fps if spec is not None else FPS
+    expected_width = spec.output_width if spec is not None else 1080
+    expected_height = spec.output_height if spec is not None else 1920
     final = Path(final)
     if not final.is_file():
         raise ValueError(f"assembled MP4 missing: {final}")
@@ -868,20 +914,21 @@ def validate_assembled_mp4(final, info) -> dict:
     if not vid:
         raise ValueError("assembled MP4 has no video stream")
     frames = int(vid.get("nb_read_frames") or vid.get("nb_frames") or 0)
-    if frames != TOTAL_FRAMES:
-        raise ValueError(f"assembled MP4 has {frames} frames, expected {TOTAL_FRAMES}")
+    if frames != expected_frames:
+        raise ValueError(f"assembled MP4 has {frames} frames, expected {expected_frames}")
     fps_raw = str(vid.get("r_frame_rate") or vid.get("avg_frame_rate") or "")
     try:
         num, den = (int(x) for x in fps_raw.split("/"))
         fps_val = num / den if den else 0
     except (ValueError, ZeroDivisionError):
         fps_val = 0
-    if abs(fps_val - FPS) > 0.01:
-        raise ValueError(f"assembled MP4 fps {fps_raw}, expected {FPS}")
-    # The final video is 1080x1920 (WIDTH/HEIGHT in h3_contract are the
-    # 736x1312 model resolution, not the assembled output).
-    if int(vid.get("width") or 0) != 1080 or int(vid.get("height") or 0) != 1920:
-        raise ValueError(f"assembled MP4 is {vid.get('width')}x{vid.get('height')}, expected 1080x1920")
+    if abs(fps_val - expected_fps) > 0.01:
+        raise ValueError(f"assembled MP4 fps {fps_raw}, expected {expected_fps}")
+    # The final video size is the spec's output size (1080x1920 for the
+    # frozen A/B shape; WIDTH/HEIGHT in h3_contract are the 736x1312
+    # model resolution, not the assembled output).
+    if int(vid.get("width") or 0) != expected_width or int(vid.get("height") or 0) != expected_height:
+        raise ValueError(f"assembled MP4 is {vid.get('width')}x{vid.get('height')}, expected {expected_width}x{expected_height}")
     # Decodable: one frame through the decoder.
     subprocess.run(["ffmpeg", "-v", "error", "-i", str(final),
                     "-frames:v", "1", "-f", "null", "-"],
@@ -892,7 +939,7 @@ def validate_assembled_mp4(final, info) -> dict:
     return {"sha256": sha, "md5": _md5_b64(final), "frames": frames}
 
 
-def upload_remote_archive(final, info, task, run_id, version):
+def upload_remote_archive(final, info, task, run_id, version, spec=None):
     """Validate + resumably upload the assembled MP4 from the worker
     (TASK-006 P1-A). Returns the evidence dict, or None when no
     drive_upload block was delivered (mount path / legacy runs).
@@ -908,7 +955,7 @@ def upload_remote_archive(final, info, task, run_id, version):
         raise ValueError("drive_upload block has no folder_id")
     from h3_drive_upload import DriveUploader, FileTokenProvider
 
-    validated = validate_assembled_mp4(final, info)
+    validated = validate_assembled_mp4(final, info, spec)
     upload_provider = FileTokenProvider(ROOT / "drive_upload_token.json")
     upload_provider.load_initial()
     started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -941,9 +988,12 @@ def upload_remote_archive(final, info, task, run_id, version):
 
 def main():
     task=json.loads((ROOT/'task.json').read_text())
-    version=task['variant']
+    # TASK-007: the task is a TaskSpec now. The naming token for every
+    # output file is spec.output_prefix (the old task['variant']); the
+    # A/B fixture adapter supplies it for legacy task.json files.
+    spec=_spec_from_task(task)
+    version=spec.output_prefix
     run_id=task.get('run_id','')
-    if version not in ('A','B'):raise ValueError('bad variant')
     global _JOB_RUN_ID, _JOB_VARIANT
     _JOB_RUN_ID = run_id
     _JOB_VARIANT = version
@@ -966,7 +1016,20 @@ def main():
     else:
         cache=None
     comfy=Path('/content/ComfyUI')
-    if not (ROOT/'poster.jpg').is_file():raise FileNotFoundError('poster missing')
+    # Reference images, verified before any expensive stage. Legacy
+    # task.json (no task_spec): the only reference is the uploaded
+    # poster.jpg. Spec task: the controller uploaded ref_image_1.jpg /
+    # ref_image_2.jpg; re-verify the received bytes against the spec
+    # SHA-256s here, so a corrupted upload can never reach inference.
+    legacy = task.get('task_spec') is None
+    if legacy:
+        ref1 = ref2 = ROOT/'poster.jpg'
+        if not ref1.is_file():raise FileNotFoundError('poster missing')
+    else:
+        ref1 = ROOT/'ref_image_1.jpg'
+        ref2 = ROOT/'ref_image_2.jpg'
+        validate_ref_image(ref1, spec.ref_image_1.sha256)
+        validate_ref_image(ref2, spec.effective_ref_image_2.sha256)
     server='http://127.0.0.1:8188'
     logfile=(ROOT/'comfyui.log').open('a')
     proc=None
@@ -982,7 +1045,8 @@ def main():
         set_stage('restore_weights')
         restore_weights(comfy,cache,manifest,rate_cu_h=task.get('rate_cu_h'),budget_cu=task.get('session_budget_cu'),drive_download=drive_download,token_provider=token_provider)
         (comfy/'input').mkdir(exist_ok=True)
-        shutil.copy2(ROOT/'poster.jpg',comfy/'input'/'muse_original_poster.jpg')
+        shutil.copy2(ref1,comfy/'input'/'muse_ref_1.jpg')
+        shutil.copy2(ref2,comfy/'input'/'muse_ref_2.jpg')
         set_stage('comfyui_start')
         proc=subprocess.Popen([sys.executable,'main.py','--listen','127.0.0.1','--port','8188'],cwd=comfy,stdout=logfile,stderr=subprocess.STDOUT,start_new_session=True)
         set_stage('object_info_validation')
@@ -990,7 +1054,7 @@ def main():
         info=object_info
         print('COMFYUI_HEALTH_OK',flush=True)
         raw=json.loads((ROOT/'workflow_api.json').read_text())
-        api=patch_api_workflow(raw,version,'muse_original_poster.jpg',seed=42 if version=='A' else 43,run_id=run_id)
+        api=patch_api_workflow_for_spec(raw,spec,'muse_ref_1.jpg','muse_ref_2.jpg',run_id=run_id)
         validate_api_against_object_info(api,info)
         (ROOT/'workflow_submitted.json').write_text(json.dumps(api,ensure_ascii=False,indent=2))
         print('COMFY_OBJECT_INFO_VALIDATED',flush=True)
@@ -1002,7 +1066,7 @@ def main():
         outputs=execute_prompt(server,api,timeout_sec=task['inference_timeout_sec'])
         set_stage('find_rendered_video')
         try:
-            source = find_rendered_video(comfy, outputs, run_id, version)
+            source = find_rendered_video(comfy, outputs, run_id, version, spec=spec)
         except RuntimeError:
             # History could not locate a verifiable video (wrong shape,
             # stale name, or failed probe). Bounded rescue scans
@@ -1011,7 +1075,7 @@ def main():
             # session budget — the controller's exec timeout still bounds
             # the whole worker run.
             set_stage('rescue_rendered_video')
-            rescued = rescue_rendered_video(comfy, run_id, version, remaining_budget_seconds=300)
+            rescued = rescue_rendered_video(comfy, run_id, version, remaining_budget_seconds=300, spec=spec)
             source = Path(rescued['path'])
             print('VIDEO_RESCUED_JSON:' + json.dumps(rescued, ensure_ascii=False), flush=True)
         # Explicit INFERENCE_COMPLETED: a verifiable rendered video exists.
@@ -1019,7 +1083,16 @@ def main():
         except Exception:pass
         set_stage('assemble_mp4')
         final=ROOT/'output'/f'shao_nian_h3_{version}.mp4'
-        info=assemble_video(source,ROOT/'poster.jpg',final)
+        # The tail card is the spec's ref_image_1 held for
+        # tail_card_frames; with tail_card_frames=0 there is no tail
+        # and the animation is delivered alone.
+        tail_image = ref1 if spec.tail_card_frames > 0 else None
+        info=assemble_video(source,tail_image,final,
+                            animation_frames=spec.animation_frames,
+                            tail_card_frames=spec.tail_card_frames,
+                            tail_sha256=spec.ref_image_1.sha256 if spec.tail_card_frames > 0 else None,
+                            fps=spec.fps, output_width=spec.output_width,
+                            output_height=spec.output_height)
         # assemble_video returns 'frames' (see assemble.py); the old
         # 'frame_count' key printed None here (TASK-003 §3).
         print('MP4_WRITTEN',str(final),final.stat().st_size,info.get('frames'),flush=True)
@@ -1032,7 +1105,7 @@ def main():
         if task.get('drive_upload') is not None:
             set_stage('remote_upload')
             try:
-                remote_upload=upload_remote_archive(final,info,task,run_id,version)
+                remote_upload=upload_remote_archive(final,info,task,run_id,version,spec)
             except Exception as e:
                 try:write_job_state(ROOT,run_id,version,'REMOTE_UPLOAD_FAILED',extra={'remote_upload_failed':{'error_type':type(e).__name__,'error':str(e)[:300]}})
                 except Exception:pass

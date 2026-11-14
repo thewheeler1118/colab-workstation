@@ -1,7 +1,9 @@
 """Muse -> official colab CLI -> H3 G4/A100 orchestration.
 
-GPU DISABLED unless explicit flags. Single-variant `run` per invocation;
-A and B share one persistent per-task 30 CU ledger
+GPU DISABLED unless explicit flags. One TaskSpec `run` per invocation
+(--task-spec <spec.json>; --variant A|B is only the built-in fixture
+adapter that builds the equivalent spec). Tasks share one persistent
+per-task 30 CU ledger
 (model_cache/h3_production_budget_<production_task_id>.json).
 The pre-2026-11-11-08:25 ledger (model_cache/h3_production_budget_30cu.json)
 is archived read-only and never written again.
@@ -61,6 +63,12 @@ from h3_contract import (
     POSTER_SHA256,
     POSTER_DRIVE_ID,
     STORY_DRIVE_ID,
+)
+from h3_task_spec import (
+    TaskSpec,
+    load_task_spec,
+    task_spec_for_variant,
+    validate_ref_image_file,
 )
 from auth_support import resolve_colab_executable, audit_user_adc_file
 from h3_environment import verify_environment
@@ -131,6 +139,146 @@ def _comfyui_download_task():
     }
 
 
+# ---------------------------------------------------------------------------
+# TASK-007: the generic task engine. One TaskSpec drives a run; --variant
+# A|B is only the built-in fixture adapter. These helpers resolve the
+# spec for every action and materialise its reference images as local
+# files (verified against their SHA-256s) before any GPU exists.
+# ---------------------------------------------------------------------------
+
+def resolve_run_spec(args) -> TaskSpec:
+    """Resolve the one TaskSpec for this invocation.
+
+    --task-spec wins and must agree with --production-task-id when both
+    are given; --task-spec and --variant together is an error. With no
+    --task-spec, --variant A|B maps through the built-in fixture
+    adapter bound to the repo poster. Neither given is an error (the
+    caller decides whether a spec is required for its action).
+    A previously resolved spec stashed on args._task_spec is reused.
+    """
+    cached = getattr(args, "_task_spec", None)
+    if isinstance(cached, TaskSpec):
+        return cached
+    spec_path = getattr(args, "task_spec", None)
+    variant = getattr(args, "variant", None)
+    if spec_path and variant:
+        raise ValueError("--task-spec and --variant conflict; pass exactly one")
+    if spec_path:
+        spec = load_task_spec(spec_path)
+        task_id = getattr(args, "production_task_id", "") or PRODUCTION_TASK_ID
+        if getattr(args, "production_task_id", "") and spec.task_id != task_id:
+            raise ValueError(
+                f"--task-spec task_id {spec.task_id!r} does not match "
+                f"--production-task-id {task_id!r}")
+        args._task_spec = spec
+        return spec
+    if variant in ("A", "B"):
+        task_id = getattr(args, "production_task_id", "") or PRODUCTION_TASK_ID
+        spec = task_spec_for_variant(variant, task_id, ROOT / "assets" / "original_poster.jpg")
+        args._task_spec = spec
+        return spec
+    raise ValueError("--task-spec <spec.json> or --variant A|B is required")
+
+
+def resolve_optional_spec(args):
+    """Resolve a spec when one was given; None when neither --task-spec
+    nor --variant was passed (the caller then runs its legacy path)."""
+    if getattr(args, "task_spec", None) or getattr(args, "variant", None):
+        return resolve_run_spec(args)
+    return getattr(args, "_task_spec", None)
+
+
+def _spec_from_manifest(manifest: dict):
+    """Rebuild the TaskSpec a run started with, from its durable
+    manifest (artifacts.task_spec, recorded at authorisation). Older
+    manifests without one fall back to the A/B fixture adapter when
+    their variant is A/B; anything else is None (callers then use the
+    frozen A/B delivery shape)."""
+    stored = (manifest.get("artifacts") or {}).get("task_spec")
+    if isinstance(stored, dict):
+        try:
+            return TaskSpec.from_dict(stored)
+        except ValueError:
+            return None
+    variant = manifest.get("variant")
+    if variant in ("A", "B"):
+        try:
+            return task_spec_for_variant(
+                variant, manifest.get("production_task_id", "legacy"),
+                ROOT / "assets" / "original_poster.jpg")
+        except ValueError:
+            return None
+    return None
+
+
+def _download_drive_file(file_id: str, dest: Path, drive=None) -> Path:
+    """Download one Drive file by id to dest (metadata + media read
+    only, no writes to Drive). The caller verifies the SHA-256.
+    `drive` is a dependency-injection hook for tests."""
+    from drive_depot import drive_service
+
+    svc = drive or drive_service()
+    data = svc.files().get_media(fileId=file_id).execute()
+    if not isinstance(data, (bytes, bytearray)):
+        raise RuntimeError(f"Drive download for {file_id} did not return bytes")
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(bytes(data))
+    return dest
+
+
+def _materialize_ref_images(spec: TaskSpec, dest_dir: Path, drive=None) -> dict:
+    """Make both reference images available as local files, verified
+    against the spec SHA-256s, BEFORE any GPU exists.
+
+    Local refs are validated in place and returned as-is. Drive refs
+    are downloaded to dest_dir/ref_image_1.jpg (or _2.jpg) and verified
+    right after download. Returns {"ref_image_1": Path,
+    "ref_image_2": Path}; ref_image_2 reuses ref_image_1's file when
+    the spec reuses it. Raises on any missing file or hash mismatch.
+    """
+    dest_dir = Path(dest_dir)
+    out = {}
+    for key, ref, fname in (
+            ("ref_image_1", spec.ref_image_1, "ref_image_1.jpg"),
+            ("ref_image_2", spec.effective_ref_image_2, "ref_image_2.jpg")):
+        if ref.local_path is not None:
+            validate_ref_image_file(ref.local_path, ref.sha256)
+            out[key] = Path(ref.local_path)
+        else:
+            dest = dest_dir / fname
+            _download_drive_file(ref.drive_file_id, dest, drive=drive)
+            validate_ref_image_file(dest, ref.sha256)
+            out[key] = dest
+    return out
+
+
+def _check_task_spec_refs(spec: TaskSpec, drive=None) -> str:
+    """Preflight reference-image gate (0 CU): local refs must exist with
+    matching SHA-256; Drive refs must exist and not be trashed (their
+    SHA-256 cannot be proven from Drive metadata — it is verified when
+    the file is materialised, still before any GPU). Returns a summary.
+    """
+    from drive_depot import drive_service
+
+    parts = []
+    for key, ref in (("ref_image_1", spec.ref_image_1),
+                     ("ref_image_2", spec.effective_ref_image_2)):
+        if ref.local_path is not None:
+            validate_ref_image_file(ref.local_path, ref.sha256)
+            parts.append(f"{key}=local:{Path(ref.local_path).name} sha256 ok")
+        else:
+            svc = drive or drive_service()
+            meta = svc.files().get(
+                fileId=ref.drive_file_id,
+                fields="id,name,trashed,size").execute()
+            if not meta or meta.get("trashed"):
+                raise RuntimeError(f"{key}: Drive file {ref.drive_file_id} missing or trashed")
+            parts.append(f"{key}=drive:{meta.get('name') or ref.drive_file_id} "
+                         f"size={meta.get('size')} (sha256 verified at download, pre-GPU)")
+    return "; ".join(parts)
+
+
 def _build_drive_download_block(cache_manifest):
     """Build the drive_download task block from the server-verified
     model manifest (+ the ComfyUI download entry when present).
@@ -164,12 +312,17 @@ def verify_drive_download_preflight(args) -> dict:
     """Pre-GPU-allocation proof that the noninteractive download chain
     works: the download module imports, a read-only token mints from
     the user ADC, and that token can read Drive metadata for a pinned
-    model file. This proves the credential chain only; remote
-    throughput is NOT proven here (TESTABLE_HYPOTHESIS) and is
-    measured by the remote probe + the restore itself. Raises on any
-    failure; nothing is allocated yet, so a refusal is clean."""
+    model file through the host's proven requests + certifi transport
+    (TASK-007: the old stdlib-urllib metadata read can fail behind
+    this VM's authenticated TLS-intercepting egress proxy; the remote
+    worker keeps its urllib implementation). This proves the credential
+    chain only; remote throughput is NOT proven here
+    (TESTABLE_HYPOTHESIS) and is measured by the remote probe + the
+    restore itself. Raises on any failure; nothing is allocated yet,
+    so a refusal is clean."""
     import h3_drive_download
     import h3_drive_token
+    from h3_drive_transport import build_token_drive_service
 
     if not hasattr(h3_drive_download, "DriveDownloader") \
             or not hasattr(h3_drive_download, "FileTokenProvider"):
@@ -178,28 +331,12 @@ def verify_drive_download_preflight(args) -> dict:
     # Prove the minted token against the live Drive API with a metadata
     # GET only (no media bytes): a token that cannot read metadata
     # cannot download anything either.
-    from h3_drive_download import DriveDownloader
-
-    class _PreflightProvider:
-        def __init__(self, token):
-            self._token = token
-
-        def get_token(self):
-            return self._token
-
-        def refresh(self):
-            raise RuntimeError("preflight never refreshes")
-
-        @property
-        def token_id(self):
-            return doc["token_id"]
-
-        def seconds_remaining(self):
-            return 3600.0
-
     block = _build_drive_download_block(args.cache_manifest)
-    downloader = DriveDownloader(_PreflightProvider(doc["access_token"]))
-    meta = downloader.get_metadata(block["files"][0]["file_id"])
+    service = build_token_drive_service(doc["access_token"])
+    meta = service.files().get(
+        fileId=block["files"][0]["file_id"],
+        fields="id,name,size,md5Checksum",
+        supportsAllDrives=True).execute()
     if str(meta.get("size", "")) != str(block["files"][0]["size"]):
         raise RuntimeError("preflight metadata size mismatch for probe file")
     record({"event": "drive_download_preflight_ok",
@@ -208,6 +345,45 @@ def verify_drive_download_preflight(args) -> dict:
             "probe_file_id": block["files"][0]["file_id"]})
     return {"preflight": "ok", "token_id": doc["token_id"],
             "probe_file_id": block["files"][0]["file_id"]}
+
+
+def verify_drive_file_token_archive() -> dict:
+    """Pre-GPU-allocation proof for the worker's upload direction
+    (TASK-007, TASK-006 P1-A): mint the least-privilege drive.file
+    token and prove it can see the archive root the controller
+    pre-creates with the full-scope service. Metadata GET only — zero
+    writes, no throwaway files. A token that cannot see the folder
+    cannot upload into it, which refutes the P1-A drive.file
+    hypothesis; that must fail preflight (0 CU), never the run. When
+    the archive root does not exist yet the probe is deferred to
+    bootstrap (which creates it) instead of failing. Raises on any
+    other failure. Returns token_id + folder evidence, never a token
+    value."""
+    import h3_drive_token
+    from drive_depot import drive_service, list_named
+    from h3_drive_transport import build_token_drive_service
+
+    file_doc = h3_drive_token.mint_file_token()
+    service = drive_service()
+    found = list_named(service, "root", "Muse-H3-Video-Outputs")
+    if not found:
+        return {"token_id": file_doc["token_id"], "archive_folder": None,
+                "note": "archive root not yet created; visibility probe "
+                        "deferred to bootstrap (the folder is created "
+                        "there with the full-scope service)"}
+    folder_id = found[0]["id"]
+    token_service = build_token_drive_service(file_doc["access_token"])
+    meta = token_service.files().get(
+        fileId=folder_id, fields="id,name",
+        supportsAllDrives=True).execute()
+    if meta.get("id") != folder_id:
+        raise RuntimeError(
+            "drive.file token cannot see the archive folder " + str(folder_id))
+    record({"event": "drive_file_token_archive_ok",
+            "token_id": file_doc["token_id"],
+            "archive_folder": folder_id})
+    return {"token_id": file_doc["token_id"], "archive_folder": folder_id,
+            "archive_folder_name": meta.get("name")}
 
 
 def _upload_drive_token(session: str, run_dir, token_doc: dict, remote_name: str) -> dict:
@@ -466,22 +642,39 @@ def inspect():
             "sessions": [{"name": s.session_id, "gpu": s.gpu_type} for s in ses]}
 
 
-def validate_local(api, proof):
-    validate_poster(ROOT / "assets" / "original_poster.jpg")
+def validate_local(api, proof, spec=None):
+    """Static + contract validation of the API workflow.
+
+    With a TaskSpec the workflow is patched once with that spec and the
+    node values must equal the spec values. Without one (legacy callers)
+    the old A/B loop runs: both variants must patch cleanly against
+    the frozen constants.
+    """
     manifest = json.loads(Path(proof).read_text())
     validate_model_cache_manifest(manifest)
-    from h3_contract import patch_api_workflow
+    from h3_contract import patch_api_workflow, patch_api_workflow_for_spec
 
     raw = json.loads(Path(api).read_text())
     if "nodes" in raw:
         raise ValueError("Expected ComfyUI API format, not UI-format workflow (nodes/links)")
-    for variant in ("A", "B"):
-        patched = patch_api_workflow(raw, variant)
-        node = patched["136"]["inputs"]
-        assert node["width"] == 736 and node["height"] == 1312 and node["length"] == 226
-        assert patched["124"]["inputs"]["steps"] == 25
-        assert patched["124"]["inputs"]["scheduler"] == "beta"
-        assert patched["146"]["inputs"]["value"] is False
+    if spec is None:
+        validate_poster(ROOT / "assets" / "original_poster.jpg")
+        for variant in ("A", "B"):
+            patched = patch_api_workflow(raw, variant)
+            node = patched["136"]["inputs"]
+            assert node["width"] == 736 and node["height"] == 1312 and node["length"] == 226
+            assert patched["124"]["inputs"]["steps"] == 25
+            assert patched["124"]["inputs"]["scheduler"] == "beta"
+            assert patched["146"]["inputs"]["value"] is False
+        return manifest
+    patched = patch_api_workflow_for_spec(raw, spec)
+    node = patched["136"]["inputs"]
+    assert node["width"] == spec.width and node["height"] == spec.height \
+        and node["length"] == spec.animation_frames
+    assert patched["124"]["inputs"]["steps"] == spec.steps
+    assert patched["124"]["inputs"]["scheduler"] == "beta"
+    assert patched["146"]["inputs"]["value"] is False
+    assert node["prompt"] == spec.prompt
     return manifest
 
 
@@ -548,25 +741,44 @@ def probe_actual_gpu(session: str, choice_key: str) -> dict:
     raise RuntimeError(f"GPU probe failed after 3 attempts: {last_error}")
 
 
-def validate_comfy_workflow(api_path: Path, variant: str) -> dict:
-    """Static + contract validation of the API workflow for one variant."""
+def validate_comfy_workflow(api_path: Path, spec_or_variant) -> dict:
+    """Static + contract validation of the API workflow for one task.
+
+    Accepts a TaskSpec, or a legacy "A"/"B" string (mapped through the
+    fixture adapter). The patched workflow's node values must equal the
+    spec's values.
+    """
     raw = json.loads(Path(api_path).read_text())
     if "nodes" in raw:
         raise ValueError("Expected ComfyUI API format, not UI-format workflow (nodes/links)")
-    from h3_contract import patch_api_workflow
+    from h3_contract import patch_api_workflow_for_spec
 
-    api = patch_api_workflow(raw, variant, "muse_original_poster.jpg", seed=42 if variant == "A" else 43)
+    if isinstance(spec_or_variant, TaskSpec):
+        spec = spec_or_variant
+    else:
+        spec = task_spec_for_variant(
+            spec_or_variant, PRODUCTION_TASK_ID,
+            ROOT / "assets" / "original_poster.jpg")
+    api = patch_api_workflow_for_spec(raw, spec, "muse_ref_1.jpg", "muse_ref_2.jpg")
     node = api["136"]["inputs"]
-    assert node["width"] == 736 and node["height"] == 1312 and node["length"] == 226
+    assert node["width"] == spec.width and node["height"] == spec.height \
+        and node["length"] == spec.animation_frames
     assert node["ref_image_size"] == "match"
-    assert api["124"]["inputs"]["steps"] == 25 and api["124"]["inputs"]["scheduler"] == "beta"
+    assert node["prompt"] == spec.prompt
+    assert api["124"]["inputs"]["steps"] == spec.steps and api["124"]["inputs"]["scheduler"] == "beta"
     assert api["146"]["inputs"]["value"] is False
     return api
 
 
 def preflight(args) -> dict:
-    """Fully read-only. Never creates a GPU. Returns a checks dict; raises on failure."""
+    """Fully read-only. Never creates a GPU. Returns a checks dict; raises on failure.
+
+    With a --task-spec (or --variant) the TaskSpec is resolved first:
+    its schema, reference images and workflow patch are all validated
+    here, at 0 CU. Without one the legacy A/B checks run.
+    """
     checks = {}
+    spec = resolve_optional_spec(args)
 
     def check(name, fn):
         try:
@@ -613,12 +825,46 @@ def preflight(args) -> dict:
         return result
 
     check("same_account_and_drive_ready", _drive_ready)
-    check("poster_sha256", lambda: (validate_poster(ROOT / "assets" / "original_poster.jpg"), "sha256 ok")[1])
+
+    def _drive_download_preflight():
+        # TASK-007: the dual-token gate. The readonly token is minted
+        # and proven against live Drive metadata (requests transport)
+        # before any GPU exists; an invalid_scope surfaces here, at
+        # 0 CU, never after allocation.
+        result = verify_drive_download_preflight(args)
+        return {"token_id": result["token_id"],
+                "probe_file_id": result["probe_file_id"]}
+
+    def _drive_file_token_archive():
+        # TASK-007: the drive.file token the worker will upload with
+        # is minted and proven against the archive root (metadata
+        # only, zero writes). See verify_drive_file_token_archive.
+        return verify_drive_file_token_archive()
+
+    if getattr(args, "drive_source", "download") == "download":
+        check("drive_download_preflight", _drive_download_preflight)
+        check("drive_file_token_archive", _drive_file_token_archive)
+
+    if spec is None:
+        check("poster_sha256", lambda: (validate_poster(ROOT / "assets" / "original_poster.jpg"), "sha256 ok")[1])
+    else:
+        # TASK-007 Task 3: the spec's reference images are proven here,
+        # at 0 CU — local files by SHA-256, Drive files by metadata
+        # existence (their SHA-256 is verified at materialisation,
+        # still before any GPU).
+        check("task_spec_ref_images", lambda: _check_task_spec_refs(spec))
     check("storyboard_drive_id", lambda: STORY_DRIVE_ID == "1TTv-xyLsSLSvTL1jy9ewOFM4qXUKBwpP" or (_ for _ in ()).throw(RuntimeError("Storyboard Drive ID mismatch")))
 
     def _workflow():
-        validate_local(args.workflow_api, args.cache_manifest)
-        return "API workflow A/B patch ok, 736x1312, 226 frames, 25 steps, non-Turbo"
+        if spec is None:
+            validate_local(args.workflow_api, args.cache_manifest)
+            return "API workflow A/B patch ok, 736x1312, 226 frames, 25 steps, non-Turbo"
+        validate_local(args.workflow_api, args.cache_manifest, spec)
+        validate_comfy_workflow(args.workflow_api, spec)
+        return (f"task-spec patch ok, {spec.width}x{spec.height}, "
+                f"{spec.animation_frames} frames + {spec.tail_card_frames} tail, "
+                f"{spec.steps} steps, seed {spec.seed}, "
+                f"total {spec.total_frames} frames {spec.duration_sec:.2f}s")
 
     check("comfy_api_candidate_static", _workflow)
     check("comfy_ref_pinned", lambda: args.comfy_ref == COMFY_REF_DEFAULT or (_ for _ in ()).throw(RuntimeError("ComfyUI ref is not the pinned commit")))
@@ -730,6 +976,21 @@ def preflight(args) -> dict:
 
     failed = [k for k, v in checks.items() if not v["pass"]]
     result = {"run_id": args.run_id, "checks": checks, "passed": not failed, "failed": failed}
+    if spec is not None:
+        result["task_spec"] = {
+            "task_id": spec.task_id, "output_prefix": spec.output_prefix,
+            "origin": spec.origin,
+            "ref_image_1_sha256": spec.ref_image_1.sha256,
+            "ref_image_2_sha256": spec.effective_ref_image_2.sha256,
+            "prompt_chars": len(spec.prompt),
+            "width": spec.width, "height": spec.height, "fps": spec.fps,
+            "animation_frames": spec.animation_frames,
+            "tail_card_frames": spec.tail_card_frames,
+            "total_frames": spec.total_frames,
+            "duration_sec": round(spec.duration_sec, 4),
+            "steps": spec.steps, "seed": spec.seed,
+            "output_width": spec.output_width, "output_height": spec.output_height,
+        }
     if failed:
         raise RuntimeError("Preflight failed: " + ", ".join(failed) + " -- " + json.dumps(checks, ensure_ascii=False)[:2000])
     return result
@@ -783,15 +1044,20 @@ def allocate_managed_session(gpu_choice: dict, run_id: str) -> str:
     return "muse-h3-" + uuid.uuid4().hex[:10]
 
 
-def download_and_validate_variant(session: str, variant: str, run_id: str) -> dict:
+def download_and_validate_variant(session: str, variant: str, run_id: str, spec=None) -> dict:
     from h3_video_qa import validate_final_video
 
     out_dir = OUTPUT_ROOT / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    # Remote worker writes output/shao_nian_h3_<variant>.mp4 (already assembled 274f)
+    # Remote worker writes output/shao_nian_h3_<output_prefix>.mp4 (already assembled)
     target = out_dir / f"{variant}.mp4"
     run_cli(["download", "-s", session, REMOTE + f"/output/shao_nian_h3_{variant}.mp4", str(target)], timeout=600)
-    info = validate_final_video(target)
+    info = validate_final_video(
+        target,
+        expected_frames=spec.total_frames if spec is not None else 274,
+        expected_fps=spec.fps if spec is not None else 24,
+        expected_width=spec.output_width if spec is not None else 1080,
+        expected_height=spec.output_height if spec is not None else 1920)
     # Also download the worker metadata json if present.
     meta_target = out_dir / f"{variant}.json"
     try:
@@ -1067,34 +1333,56 @@ def _lease_registry():
 
 def _register_gpu_lease(session: str, gpu_model: str, run_id: str,
                         production_task_id: str, stop_deadline_utc: str,
-                        budget_cap_cu: float) -> dict:
+                        budget_cap_cu: float, max_wall_sec=None) -> dict:
     """Register the lease for a just-allocated session (TASK-006 P0-C).
     Raises on local registry failure: the caller lets the exception
     propagate so the outer finally stops the session — an unregistered
     lease is invisible to the backup executor, so the run must not
-    proceed. The mirror write is best-effort inside register_lease."""
+    proceed. The mirror write is best-effort inside register_lease.
+    `max_wall_sec` (TASK-007) sets the lease's absolute physical cap
+    `emergency_deadline_utc` (started + max_wall + 900 s), past which
+    the executor may stop even an unfinalised lease."""
     from h3_gpu_lease_registry import current_owner_id
 
     registry = _lease_registry()
     return registry.register_lease(
         session, run_id, production_task_id, gpu_model,
-        stop_deadline_utc, budget_cap_cu, current_owner_id())
+        stop_deadline_utc, budget_cap_cu, current_owner_id(),
+        max_wall_sec=max_wall_sec)
 
 
 def _update_gpu_lease_deadline(session: str, stop_deadline_utc: str) -> None:
-    """Best-effort lease deadline finalisation, 3 attempts (TASK-006
-    P0-C). On failure records an audit event and returns: the lease
-    stays non-final and the backup executor will never stop it."""
+    """Fail-closed lease deadline finalisation, 3 attempts (TASK-007).
+    A local registry write failure raises after the retries: the caller
+    lets it propagate so the outer finally stops the session — an
+    unfinalised lease is invisible to the backup executor except past
+    its emergency cap. Only a Drive mirror failure degrades to a
+    warning event (the registry records mirror_pending and retries on
+    the next mutation). A lease that no longer exists is a warning,
+    not a raise: there is nothing to finalise."""
     registry = _lease_registry()
+    last_error: Exception | None = None
     for attempt in range(3):
         try:
-            registry.update_deadline(session, stop_deadline_utc, final=True)
+            updated = registry.update_deadline(session, stop_deadline_utc,
+                                               final=True)
+            if updated is None:
+                record({"event": "lease_deadline_missing", "session": session,
+                        "deadline_utc": stop_deadline_utc})
+                return
+            if registry.mirror_pending():
+                record({"event": "lease_mirror_pending", "session": session,
+                        "deadline_utc": stop_deadline_utc})
             return
-        except Exception:  # noqa: BLE001 - retried, then recorded
+        except Exception as e:  # noqa: BLE001 - retried, then raised
+            last_error = e
             if attempt < 2:
                 time.sleep(2)
     record({"event": "lease_deadline_sync_failed", "session": session,
-            "deadline_utc": stop_deadline_utc})
+            "deadline_utc": stop_deadline_utc,
+            "error": type(last_error).__name__ if last_error else "unknown"})
+    if last_error is not None:
+        raise last_error
 
 
 def _confirm_gpu_lease_stopped(session: str) -> None:
@@ -1169,14 +1457,17 @@ def _manifest_update(run_id: str, **kwargs) -> None:
             pass
 
 
-def _manifest_create(args, ledger) -> None:
+def _manifest_create(args, ledger, spec=None) -> None:
     """Best-effort manifest creation at task authorization (TASK-005
-    §4.1). Never raises into the run."""
+    §4.1). Never raises into the run. The TaskSpec (when given) is
+    recorded in artifacts.task_spec so resume can rebuild the exact
+    task the run started with; the manifest's variant field carries
+    the spec output_prefix."""
     try:
         import hashlib
         import subprocess
 
-        from h3_run_manifest import create_run_manifest
+        from h3_run_manifest import create_run_manifest, update_run
 
         try:
             code_commit = subprocess.run(
@@ -1197,10 +1488,12 @@ def _manifest_create(args, ledger) -> None:
                       "spent_cu": ledger.get("max_observed_spent_cu"),
                       "hard_stop_balance_cu": ledger.get("hard_stop_balance_cu")}
         create_run_manifest(ROOT, args.production_task_id, args.run_id,
-                            variant=args.variant, code_commit=code_commit,
+                            variant=spec.output_prefix if spec is not None else args.variant, code_commit=code_commit,
                             workflow_sha256=_sha(args.workflow_api),
                             model_manifest_sha256=_sha(args.cache_manifest),
                             budget=budget)
+        if spec is not None:
+            update_run(ROOT, args.run_id, artifacts={"task_spec": spec.to_dict()})
     except Exception as e:  # noqa: BLE001
         try:
             record({"event": "manifest_error", "run_id": args.run_id, "error": str(e)[:300]})
@@ -1538,14 +1831,20 @@ def wait_for_worker(session: str, run_id: str, variant: str,
         time.sleep(poll_interval_sec)
 
 
-def _archive_local_mp4(variant: str, run_id: str) -> dict:
+def _archive_local_mp4(variant: str, run_id: str, spec=None) -> dict:
     """Archive-only delivery (TASK-003 §1, shared by the `archive` action
     and by `resume`): re-validate the local MP4 and upload it with
     bounded retries. No GPU, no session, no ledger, never a re-run of
-    the inference."""
+    the inference. The MP4 is validated against the spec when one is
+    given, else against the frozen A/B delivery shape."""
     from h3_video_qa import validate_final_video
 
-    info = validate_final_video(OUTPUT_ROOT / run_id / f"{variant}.mp4")
+    info = validate_final_video(
+        OUTPUT_ROOT / run_id / f"{variant}.mp4",
+        expected_frames=spec.total_frames if spec is not None else 274,
+        expected_fps=spec.fps if spec is not None else 24,
+        expected_width=spec.output_width if spec is not None else 1080,
+        expected_height=spec.output_height if spec is not None else 1920)
     return deliver_variant_to_drive_idempotent(variant, run_id, info)
 
 
@@ -1554,8 +1853,9 @@ def _resume_archive_only(args, manifest: dict) -> dict:
     Drive upload is missing. Archive it and complete the run."""
     run_id = manifest["run_id"]
     variant = manifest["variant"]
+    spec = _spec_from_manifest(manifest)
     try:
-        delivery = _archive_local_mp4(variant, run_id)
+        delivery = _archive_local_mp4(variant, run_id, spec)
     except Exception as e:  # noqa: BLE001 - stays awaiting archive
         return {"resumed": False, "run_id": run_id,
                 "reason": f"archive-only retry failed, still awaiting archive: {e}",
@@ -1581,10 +1881,11 @@ def _resume_stopped_session(args, manifest: dict) -> dict:
 
     run_id = manifest["run_id"]
     variant = manifest["variant"]
+    spec = _spec_from_manifest(manifest)
     local_mp4 = OUTPUT_ROOT / run_id / f"{variant}.mp4"
     if local_mp4.is_file():
         try:
-            delivery = _archive_local_mp4(variant, run_id)
+            delivery = _archive_local_mp4(variant, run_id, spec)
         except Exception as e:  # noqa: BLE001 - local copy unusable
             return {"resumed": False, "run_id": run_id,
                     "reason": f"session stopped and the local MP4 cannot be archived: {e}"}
@@ -1665,9 +1966,14 @@ def _resume_finish(args, manifest: dict, worker_state: dict) -> dict:
     run_id = manifest["run_id"]
     variant = manifest["variant"]
     session_id = manifest["session_id"]
+    spec = _spec_from_manifest(manifest)
     done_info = check_job_done_info(worker_state.get("output"), variant)
     output_check = exec_script(session_id, ROOT / "h3_output_check.py", timeout=180,
-                               env={"H3_VARIANT": variant})
+                               env={"H3_VARIANT": variant,
+                                    "H3_EXPECTED_FRAMES": str(spec.total_frames) if spec is not None else "274",
+                                    "H3_EXPECTED_FPS": str(spec.fps) if spec is not None else "24",
+                                    "H3_OUTPUT_WIDTH": str(spec.output_width) if spec is not None else "1080",
+                                    "H3_OUTPUT_HEIGHT": str(spec.output_height) if spec is not None else "1920"})
     check_remote_output(output_check, variant)
     record({"event": "resume_remote_output_checked", "variant": variant,
             "session": session_id, "done": done_info})
@@ -1677,13 +1983,18 @@ def _resume_finish(args, manifest: dict, worker_state: dict) -> dict:
     local_mp4 = OUTPUT_ROOT / run_id / f"{variant}.mp4"
     if local_mp4.is_file():
         try:
-            info = validate_final_video(local_mp4)
+            info = validate_final_video(
+                local_mp4,
+                expected_frames=spec.total_frames if spec is not None else 274,
+                expected_fps=spec.fps if spec is not None else 24,
+                expected_width=spec.output_width if spec is not None else 1080,
+                expected_height=spec.output_height if spec is not None else 1920)
             record({"event": "resume_local_mp4_reused", "variant": variant,
                     "run_id": run_id, "sha256": info["sha256"]})
         except Exception:
             info = None  # re-download below; a stale local file is never trusted
     if info is None:
-        info = download_and_validate_variant(session_id, variant, run_id)
+        info = download_and_validate_variant(session_id, variant, run_id, spec)
     _manifest_update(run_id, task_state="VIDEO_VALIDATED",
                      last_verified_stage="VIDEO_VALIDATED",
                      artifacts={"local_sha256": info["sha256"],
@@ -1808,6 +2119,17 @@ def _resume_bootstrap(args, manifest: dict) -> dict:
                 "reason": "remaining budget cannot cover a minimal resumed run + cleanup reserve"}
     run_dir = RUNS / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    # TASK-007: rebuild the run's TaskSpec from the manifest (recorded
+    # at authorisation) so the resumed bootstrap uploads the same
+    # reference images and task.json as the original run. The session
+    # already exists, so this materialisation spends no new GPU.
+    spec = _spec_from_manifest(manifest)
+    if spec is not None:
+        args._task_spec = spec
+        args.variant = spec.output_prefix
+        refs = _materialize_ref_images(spec, run_dir)
+        args._ref_image_1_path = refs["ref_image_1"]
+        args._ref_image_2_path = refs["ref_image_2"]
     start = time.monotonic()
     boot = _run_bootstrap(args, session_id, run_dir, budget_sec, live["rate"], start)
     launch = launch_worker(session_id)
@@ -2069,7 +2391,21 @@ def _run_bootstrap(args, session: str, run_dir: Path, budget_sec: int,
     the run falls back to controller-side delivery.
     """
     run_id = args.run_id
-    variant = args.variant
+    # TASK-007: the bootstrap runs one TaskSpec. run_variant resolves
+    # and materialises it before allocation; _resume_bootstrap rebuilds
+    # it from the manifest. A direct caller falls back to resolving
+    # from args (--task-spec / --variant) and materialising here.
+    spec = getattr(args, "_task_spec", None) or resolve_optional_spec(args)
+    if spec is None:
+        raise ValueError("bootstrap needs a TaskSpec (--task-spec or --variant)")
+    args._task_spec = spec
+    variant = spec.output_prefix
+    ref1_path = getattr(args, "_ref_image_1_path", None)
+    ref2_path = getattr(args, "_ref_image_2_path", None)
+    if ref1_path is None or ref2_path is None:
+        refs = _materialize_ref_images(spec, run_dir)
+        ref1_path, ref2_path = refs["ref_image_1"], refs["ref_image_2"]
+        args._ref_image_1_path, args._ref_image_2_path = ref1_path, ref2_path
     drive_source = getattr(args, "drive_source", "download")
     bootstrap = _bootstrap_state(run_id)
     done_steps = dict(bootstrap.get("steps") or {})
@@ -2108,13 +2444,21 @@ def _run_bootstrap(args, session: str, run_dir: Path, budget_sec: int,
         _finish("init_remote")
     if not _is_done("upload_contract_files"):
         _begin("upload_contract_files")
-        # Upload poster, contract, assemble, manifest, workflow, submitted workflow.
-        api = validate_comfy_workflow(args.workflow_api, variant)
+        # Upload the spec's reference images, the contract, assemble,
+        # manifest, workflow, submitted workflow. ref_image_1.jpg /
+        # ref_image_2.jpg are what the worker verifies and injects;
+        # poster.jpg carries ref_image_1 under the legacy name so a
+        # legacy worker fallback (task.json without task_spec) still
+        # finds its poster.
+        api = validate_comfy_workflow(args.workflow_api, spec)
         submitted_path = run_dir / f"workflow_{variant}_submitted.json"
         submitted_path.write_text(json.dumps(api, ensure_ascii=False, indent=2))
         for source, target in [
-            (ROOT / "assets" / "original_poster.jpg", REMOTE + "/poster.jpg"),
+            (Path(ref1_path), REMOTE + "/poster.jpg"),
+            (Path(ref1_path), REMOTE + "/ref_image_1.jpg"),
+            (Path(ref2_path), REMOTE + "/ref_image_2.jpg"),
             (ROOT / "h3_contract.py", REMOTE + "/h3_contract.py"),
+            (ROOT / "h3_task_spec.py", REMOTE + "/h3_task_spec.py"),
             (ROOT / "assemble.py", REMOTE + "/assemble.py"),
             (Path(args.cache_manifest), REMOTE + "/model_manifest.json"),
             (Path(args.workflow_api), REMOTE + "/workflow_api.json"),
@@ -2210,6 +2554,8 @@ def _run_bootstrap(args, session: str, run_dir: Path, budget_sec: int,
     if elapsed > budget_sec:
         raise TimeoutError("Budget wall time reached before " + variant)
     task = {"variant": variant, "run_id": run_id, "drive_cache_dir": args.drive_cache_dir, "comfy_ref": args.comfy_ref,
+            "production_task_id": getattr(args, "production_task_id", PRODUCTION_TASK_ID),
+            "task_spec": spec.to_dict(),
             "inference_timeout_sec": min(1800, max(100, int(budget_sec - elapsed - 120))),
             "rate_cu_h": live_rate,
             "session_budget_cu": round(budget_sec * float(live_rate) / 3600.0, 3),
@@ -2238,9 +2584,11 @@ def _run_bootstrap(args, session: str, run_dir: Path, budget_sec: int,
 @_with_task_lock
 def run_variant(args) -> dict:
     global _EXEC_LOG_DIR, LEDGER_PATH, PRODUCTION_TASK_ID
-    variant = args.variant
-    if variant not in ("A", "B"):
-        raise ValueError("variant must be A or B")
+    # TASK-007: one run is one TaskSpec. --task-spec loads it; --variant
+    # A|B maps through the fixture adapter. The naming token for every
+    # output file is spec.output_prefix (the old "variant" label).
+    spec = resolve_run_spec(args)
+    variant = spec.output_prefix
     # TASK-002 §5.2: the production task must be named explicitly. The
     # historical default h3-ab-20261111 is never reused silently: a new
     # RUN_ID without --production-task-id used to bind to the old task's
@@ -2292,8 +2640,8 @@ def run_variant(args) -> dict:
             f"run_id {args.run_id} already exists (state {_state}); refusing to start a second run "
             f"with the same run id — a duplicate run would allocate a second paid GPU and re-run "
             f"inference. Use a new run id, or 'status'/'resume' to inspect or recover the existing run.")
-    validate_local(args.workflow_api, args.cache_manifest)
-    validate_comfy_workflow(args.workflow_api, variant)
+    validate_local(args.workflow_api, args.cache_manifest, spec)
+    validate_comfy_workflow(args.workflow_api, spec)
     # Live Drive READY + same account, before any paid GPU.
     from drive_depot import drive_service, account_matches, verify_ready
 
@@ -2310,7 +2658,18 @@ def run_variant(args) -> dict:
                                            getattr(args, "task_deadline_utc", "")))
     # Durable run manifest (TASK-005 §4.1): the task is authorised here,
     # so the persistent record starts now and survives a controller restart.
-    _manifest_create(args, ledger)
+    _manifest_create(args, ledger, spec)
+    # TASK-007: materialise the spec's reference images BEFORE any GPU
+    # exists — a missing file or a SHA-256 mismatch refuses here, at
+    # 0 CU, never after allocation. The bootstrap uploads these files.
+    _ref_dir = RUNS / args.run_id
+    _ref_dir.mkdir(parents=True, exist_ok=True)
+    _refs = _materialize_ref_images(spec, _ref_dir)
+    args._ref_image_1_path = _refs["ref_image_1"]
+    args._ref_image_2_path = _refs["ref_image_2"]
+    record({"event": "ref_images_materialised", "run_id": args.run_id,
+            "ref_image_1": str(_refs["ref_image_1"]),
+            "ref_image_2": str(_refs["ref_image_2"])})
     # Environment contract (TASK-005 §6, Issue #29): the pinned CLI
     # (0.7.5 + both production patches), ffmpeg/ffprobe and the allowed
     # Python versions must match the checked-in manifest BEFORE any live
@@ -2417,7 +2776,8 @@ def run_variant(args) -> dict:
                            production_task_id=args.production_task_id, status="allocating")
             _register_gpu_lease(session, chosen_key, args.run_id,
                                 args.production_task_id, pre_deadline.isoformat(),
-                                args.per_session_budget_cu)
+                                args.per_session_budget_cu,
+                                max_wall_sec=args.max_wall_sec)
             try:
                 cmd = allocation_command(session, chosen_key, allow_g4=args.allow_g4, allow_a100_highmem=args.allow_a100_highmem)
                 # 420s: with the POST-body patch a G4 503 is retried inside
@@ -2523,8 +2883,9 @@ def run_variant(args) -> dict:
             new_deadline = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=budget_sec)
             update_session_deadline(session, new_deadline.isoformat())
             # TASK-006 P0-C: finalise the lease deadline for the backup
-            # executor (best-effort; a failed finalisation leaves the
-            # lease non-final and the executor will never stop it).
+            # executor (fail-closed since TASK-007: a local write failure
+            # raises into the outer finally, which stops the session;
+            # only a Drive mirror failure degrades to a warning).
             _update_gpu_lease_deadline(session, new_deadline.isoformat())
             record({"event": "watchdog_deadline_updated", "session": session,
                     "budget_sec": budget_sec, "rate_cu_h": live["rate"],
@@ -2574,12 +2935,17 @@ def run_variant(args) -> dict:
             _record_remote_upload(args.run_id, worker_state)
             record({"event": "delivery_state", "variant": variant, "run_id": args.run_id, "state": "INFERENCE_COMPLETED"})
             # Independent remote verification of the real MP4 BEFORE any
-            # download: the file must exist and ffprobe must read exactly
-            # 274 frames at 24 fps, 1080x1920. Only then is the download
-            # allowed; the local ffprobe validation after download is a
-            # second, independent check before any success report.
+            # download: the file must exist and ffprobe must read the
+            # spec's total frames at the spec fps and output size. Only
+            # then is the download allowed; the local ffprobe validation
+            # after download is a second, independent check before any
+            # success report.
             output_check = exec_script(session, ROOT / "h3_output_check.py", timeout=180,
-                                       env={"H3_VARIANT": variant})
+                                       env={"H3_VARIANT": variant,
+                                            "H3_EXPECTED_FRAMES": str(spec.total_frames),
+                                            "H3_EXPECTED_FPS": str(spec.fps),
+                                            "H3_OUTPUT_WIDTH": str(spec.output_width),
+                                            "H3_OUTPUT_HEIGHT": str(spec.output_height)})
             checked = check_remote_output(output_check, variant)
             record({"event": "remote_output_checked", "variant": variant, "session": session, "checked": checked})
             record({"event": "delivery_state", "variant": variant, "run_id": args.run_id, "state": "REMOTE_MP4_VALIDATED"})
@@ -2588,7 +2954,7 @@ def run_variant(args) -> dict:
                 run_cli(["download", "-s", session, REMOTE + "/workflow_submitted.json", str(run_dir / f"workflow_{variant}_submitted_remote.json")], timeout=120)
             except Exception:
                 pass
-            info = download_and_validate_variant(session, variant, args.run_id)
+            info = download_and_validate_variant(session, variant, args.run_id, spec)
             _manifest_update(args.run_id, task_state="VIDEO_VALIDATED",
                              last_verified_stage="VIDEO_VALIDATED",
                              artifacts={"local_sha256": info["sha256"],
@@ -2705,9 +3071,27 @@ def test_or_run(args):
         print(json.dumps(inspect(), ensure_ascii=False, indent=2))
         return
     if args.action == "plan":
-        print(json.dumps({"goal": "A/B R2V", "gpu": "G4_THEN_A100_HIGHMEM", "poster_sha256": POSTER_SHA256,
-                          "video_frames_per_variant": 274, "output": "1080x1920, 24fps",
-                          "historic_remaining_cu": HIST_REMAIN, "historic_stop_balance": HARD_STOP,
+        spec = resolve_optional_spec(args)
+        if spec is None:
+            print(json.dumps({"goal": "A/B R2V", "gpu": "G4_THEN_A100_HIGHMEM", "poster_sha256": POSTER_SHA256,
+                              "video_frames_per_variant": 274, "output": "1080x1920, 24fps",
+                              "historic_remaining_cu": HIST_REMAIN, "historic_stop_balance": HARD_STOP,
+                              "project_budget_cu": PROJECT_BUDGET_CU, "per_session_budget_cu": PER_SESSION_BUDGET_CU,
+                              "no_gpu_created": True, "workflows": "Require API-format official R2V workflow and four-file server-verified manifest"}, ensure_ascii=False, indent=2))
+            return
+        print(json.dumps({"goal": "MiniMax-H3 generic task", "gpu": "G4_THEN_A100_HIGHMEM",
+                          "task_id": spec.task_id, "output_prefix": spec.output_prefix,
+                          "origin": spec.origin,
+                          "ref_image_1_sha256": spec.ref_image_1.sha256,
+                          "ref_image_2_sha256": spec.effective_ref_image_2.sha256,
+                          "prompt_chars": len(spec.prompt),
+                          "width": spec.width, "height": spec.height, "fps": spec.fps,
+                          "animation_frames": spec.animation_frames,
+                          "tail_card_frames": spec.tail_card_frames,
+                          "total_frames": spec.total_frames,
+                          "duration_sec": round(spec.duration_sec, 4),
+                          "steps": spec.steps, "seed": spec.seed,
+                          "output": f"{spec.output_width}x{spec.output_height}, {spec.fps}fps",
                           "project_budget_cu": PROJECT_BUDGET_CU, "per_session_budget_cu": PER_SESSION_BUDGET_CU,
                           "no_gpu_created": True, "workflows": "Require API-format official R2V workflow and four-file server-verified manifest"}, ensure_ascii=False, indent=2))
         return
@@ -2718,14 +3102,15 @@ def test_or_run(args):
     if args.action == "archive":
         # TASK-003 §1: archive-only retry. No GPU, no session, no ledger:
         # re-validate the local MP4 (raises unless it is the validated
-        # 274-frame final video) and run the deliver helper, which re-proves
-        # the file and uploads with bounded retries. Use after a run whose
-        # local MP4 survived but whose Drive upload failed.
-        if not args.variant:
-            raise ValueError("--variant A|B is required for archive")
+        # final video) and run the deliver helper, which re-proves the
+        # file and uploads with bounded retries. Use after a run whose
+        # local MP4 survived but whose Drive upload failed. The MP4 is
+        # validated against the run's TaskSpec (from --task-spec, or the
+        # A/B fixture adapter).
+        spec = resolve_run_spec(args)
         if not args.run_id:
             raise ValueError("--run-id is required for archive")
-        delivery = _archive_local_mp4(args.variant, args.run_id)
+        delivery = _archive_local_mp4(spec.output_prefix, args.run_id, spec)
         print(json.dumps(delivery, ensure_ascii=False, indent=2))
         return delivery
     if args.action == "status":
@@ -2795,7 +3180,16 @@ def main():
                              "that metric's denominator. A recorded deadline never moves.")
     parser.add_argument("--prior-unbilled-reserve-cu", type=float, default=PRIOR_TASK_UNBILLED_RESERVE_CU)
     parser.add_argument("--gpu-policy", default="G4_THEN_A100_HIGHMEM")
-    parser.add_argument("--variant", choices=("A", "B"), default=None)
+    parser.add_argument("--variant", choices=("A", "B"), default=None,
+                        help="Legacy A/B fixture only: builds the equivalent "
+                             "TaskSpec from the frozen poster contract. New "
+                             "tasks must use --task-spec instead.")
+    parser.add_argument("--task-spec", default=None,
+                        help="Path to a generic task-spec JSON file "
+                             "(see h3_task_spec.py). When given, --variant "
+                             "must not be passed; the run is fully driven "
+                             "by the spec and --production-task-id must "
+                             "match the spec's task_id.")
     parser.add_argument("--run-id", default="")
     parser.add_argument("--max-rate-cu-h", type=float, default=14.0)
     parser.add_argument("--max-wall-sec", type=int, default=MAX_SESSION_SECONDS)
@@ -2815,12 +3209,17 @@ def main():
     _COLAB_AUTH = a.colab_auth
     if a.action == "run" and not a.production_task_id:
         parser.error("--production-task-id is required for run; the historical default is never reused silently")
+    # TASK-007: preflight/plan with --task-spec and no --production-task-id
+    # take the task id from the spec file itself (the user authored it
+    # there). run/archive still require --production-task-id on the CLI.
+    if a.task_spec and not a.production_task_id and a.action in ("preflight", "plan"):
+        a.production_task_id = load_task_spec(a.task_spec).task_id
     if a.production_task_id:
         PRODUCTION_TASK_ID = a.production_task_id
         LEDGER_PATH = ledger_path_for_task(ROOT, PRODUCTION_TASK_ID)
     PRIOR_TASK_UNBILLED_RESERVE_CU = float(a.prior_unbilled_reserve_cu)
-    if a.action in ("run", "archive") and not a.variant:
-        parser.error("--variant A|B is required for run/archive")
+    if a.action in ("run", "archive") and not a.variant and not a.task_spec:
+        parser.error("--task-spec <spec.json> or --variant A|B is required for run/archive")
     if a.action in ("run", "archive") and not a.run_id:
         parser.error("--run-id is required for run/archive")
     if a.action in ("resume", "stop") and not a.run_id:

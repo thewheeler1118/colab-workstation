@@ -1,28 +1,34 @@
 """Remote output check (runs on the Colab runtime, stdlib only).
 
 Verifies the real final MP4 BEFORE the controller downloads it: the file
-must exist under /content/muse_h3/output/ and ffprobe must read exactly
-274 frames at 24 fps and 1080x1920. Prints one line:
+must exist under /content/muse_h3/output/ and ffprobe must read the
+expected frames at the expected fps and size. Prints one line:
     OUTPUT_CHECK_JSON:{"ok": true, "exists": true, "size_bytes": ...,
                        "frames": 274, "fps": 24, "width": 1080,
                        "height": 1920, "codec": "..."}
 or ok=false with a reason. The controller's check_remote_output() fails
 closed on anything other than the full pass.
+
+Expected values come from the environment (the controller passes the
+TaskSpec's total frames / fps / output size); the defaults are the
+frozen A/B delivery shape (274 frames, 24 fps, 1080x1920).
 """
 import json
 import os
 import subprocess
 import sys
 
-EXPECTED_FRAMES = 274
-EXPECTED_FPS = 24
-EXPECTED_WIDTH = 1080
-EXPECTED_HEIGHT = 1920
+EXPECTED_FRAMES = int(os.environ.get("H3_EXPECTED_FRAMES", "274"))
+EXPECTED_FPS = float(os.environ.get("H3_EXPECTED_FPS", "24"))
+EXPECTED_WIDTH = int(os.environ.get("H3_OUTPUT_WIDTH", "1080"))
+EXPECTED_HEIGHT = int(os.environ.get("H3_OUTPUT_HEIGHT", "1920"))
 
 
 def main():
     variant = os.environ.get("H3_VARIANT", "A")
-    path = f"/content/muse_h3/output/shao_nian_h3_{variant}.mp4"
+    # H3_CHECK_PATH overrides the remote path for offline testing only;
+    # production always derives it from H3_VARIANT.
+    path = os.environ.get("H3_CHECK_PATH") or f"/content/muse_h3/output/shao_nian_h3_{variant}.mp4"
     info = {"ok": False, "exists": False, "path": path}
     if not os.path.exists(path):
         info["reason"] = "mp4_missing"

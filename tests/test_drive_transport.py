@@ -174,6 +174,22 @@ class DriveServiceTest(unittest.TestCase):
         _, kwargs = mock_build.call_args
         self.assertIsInstance(kwargs["http"], RequestsHttp)
 
+    def test_build_token_drive_service_wraps_the_token(self):
+        # TASK-007: the preflight probes build a service from one
+        # short-lived token — no ADC, no refresh, same requests
+        # transport. The token value is only ever handed to the
+        # Credentials object, never logged.
+        import h3_drive_transport as ht
+
+        with patch.object(ht, "build_requests_drive_service",
+                          return_value="fake-service") as build_svc:
+            service = ht.build_token_drive_service("tok-abc-123")
+        self.assertEqual(service, "fake-service")
+        creds = build_svc.call_args[0][0]
+        self.assertEqual(creds.token, "tok-abc-123")
+        self.assertTrue(creds.valid)
+        self.assertIsNone(getattr(creds, "service_account_email", None))
+
 
 @unittest.skipUnless(HAS_GOOGLE_LIBS,
                        "google-api-python-client not installed (CI)")

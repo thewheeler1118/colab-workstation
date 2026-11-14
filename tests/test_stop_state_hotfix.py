@@ -343,6 +343,13 @@ class _ChainHarness(unittest.TestCase):
         self._po(hc.time, "sleep", lambda s: None)
         self._po(hc, "validate_local")
         self._po(hc, "validate_comfy_workflow", return_value={})
+        # TASK-007: reference-image materialisation is stubbed here the
+        # same way validate_local is — the real function (local SHA-256
+        # check + Drive download) is covered by tests/test_task_spec.py,
+        # and the temp ROOT has no poster file.
+        self._po(hc, "_materialize_ref_images",
+                 return_value={"ref_image_1": Path("/tmp/ref_image_1.jpg"),
+                               "ref_image_2": Path("/tmp/ref_image_2.jpg")})
         self._po(hc, "verify_environment", return_value={"ok": True, "checked": []})
         self._po(hc, "verify_drive_download_preflight",
                  return_value={"preflight": "ok"})
@@ -390,7 +397,7 @@ class _ChainHarness(unittest.TestCase):
         self._po(hc, "_wait_watchdog_ready",
                  return_value={"session_id": SESSION, "production_task_id": TASK})
         self._po(hc, "ledger_path_for_task",
-                 return_value=str(Path(self.tmp.name) / "ledger.json"))
+                 return_value=Path(self.tmp.name) / "ledger.json")
         self._po(hc, "read_live_usage", return_value={"balance": 150.0, "rate": 5.0})
         # Real watchdog functions, redirected onto the temp state file.
         self._real_record = hwd.record_session

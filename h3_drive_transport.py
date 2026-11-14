@@ -120,3 +120,20 @@ def build_requests_drive_service(creds, scopes=None):
         )
     session = AuthorizedSession(creds)
     return build("drive", "v3", http=RequestsHttp(session), cache_discovery=False)
+
+
+def build_token_drive_service(access_token: str):
+    """Build a Drive v3 service on the requests transport, authenticated
+    with one short-lived access token (TASK-007).
+
+    Host-side preflight probes mint least-privilege tokens and must
+    prove them against the live Drive API through this VM's
+    authenticated TLS-intercepting egress proxy — the same requests +
+    certifi transport ``drive_service()`` uses. The token is wrapped in
+    a ``Credentials`` object with no refresh data, so the session never
+    tries to renew it; a token that is about to expire simply fails
+    and the caller mints a fresh one. The token value is never logged,
+    printed, or stored here."""
+    from google.oauth2.credentials import Credentials
+
+    return build_requests_drive_service(Credentials(token=access_token))

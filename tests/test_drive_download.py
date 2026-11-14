@@ -158,11 +158,40 @@ class FakeDrive:
             content = self.media_content[file_id]
             range_h = headers.get("range", "")
             if range_h.startswith("bytes="):
-                start = int(range_h.split("=", 1)[1].split("-", 1)[0] or 0)
-                return FakeResp(206, content[start:],
-                                {"Content-Range": f"bytes {start}-{len(content)-1}/{len(content)}"})
+                # Honour a bounded end ("bytes=0-1023") as well as an
+                # open end ("bytes=4-"); the concurrent downloader
+                # always asks for bounded shard ranges.
+                spec = range_h.split("=", 1)[1]
+                start_s, end_s = spec.split("-", 1)
+                start = int(start_s or 0)
+                end = int(end_s) if end_s else len(content) - 1
+                return FakeResp(206, content[start:end + 1],
+                                {"Content-Range": f"bytes {start}-{end}/{len(content)}"})
             return FakeResp(200, content)
         raise AssertionError("unexpected fake-drive URL: " + url)
+
+
+class _FakeTokenService:
+    """Minimal Drive service stub for the token-based preflight probes:
+    files().get().execute() returns a canned metadata dict (or raises
+    the injected error). Records the get kwargs for assertions."""
+
+    def __init__(self, meta, error=None):
+        self._meta = meta
+        self._error = error
+        self.get_kwargs = {}
+
+    def files(self):
+        return self
+
+    def get(self, **kw):
+        self.get_kwargs = kw
+        return self
+
+    def execute(self):
+        if self._error is not None:
+            raise self._error
+        return dict(self._meta)
 
 
 class DownloadTestBase(unittest.TestCase):
@@ -320,6 +349,117 @@ class FullDownloadTests(DownloadTestBase):
                 self._downloader(max_attempts=2).download_file(
                     self.FILE_ID, len(self.CONTENT), sha(self.CONTENT), self._dest())
         self.assertFalse(self._dest().exists())
+
+
+class DownloadConstantsTest(unittest.TestCase):
+    """TASK-007: concurrent-download tuning constants."""
+
+    def test_defaults(self):
+        self.assertEqual(dd.DEFAULT_CHUNK_SIZE, 8 * 1024 * 1024)
+        self.assertEqual(dd.CONCURRENT_MIN_SIZE, 256 * 1024 * 1024)
+        self.assertEqual(dd.DEFAULT_CONCURRENT_WORKERS, 4)
+
+
+class ConcurrentDownloadTest(DownloadTestBase):
+    """TASK-007: sharded concurrent download of large fresh files."""
+
+    BIG_ID = "fid-big"
+    BIG_CONTENT = bytes(range(256)) * 16  # 4096 bytes
+
+    def setUp(self):
+        super().setUp()
+        self.drive.metadata[self.BIG_ID] = {
+            "size": len(self.BIG_CONTENT),
+            "md5": hashlib.md5(self.BIG_CONTENT).hexdigest(),
+            "sha256": sha(self.BIG_CONTENT)}
+        self.drive.media_content[self.BIG_ID] = self.BIG_CONTENT
+        self.threshold_patch = patch.object(dd, "CONCURRENT_MIN_SIZE", 1024)
+        self.threshold_patch.start()
+        self.addCleanup(self.threshold_patch.stop)
+
+    def _big_downloader(self, **kw):
+        kw.setdefault("concurrent_workers", 4)
+        kw.setdefault("backoff_base_sec", 0)
+        return self._downloader(**kw)
+
+    def _media_ranges(self):
+        return [h.get("range") for _, h in self.drive.calls
+                if "alt=media" in _ and self.BIG_ID in _]
+
+    def _download_big(self, **kw):
+        progress = kw.pop("on_progress", None)
+        return self._big_downloader(**kw).download_file(
+            self.BIG_ID, len(self.BIG_CONTENT), sha(self.BIG_CONTENT),
+            self._dest("big.bin"), on_progress=progress)
+
+    def test_concurrent_success_four_shards(self):
+        seen = []
+        out = self._download_big(
+            on_progress=lambda done, total: seen.append(done))
+        self.assertEqual(Path(out["path"]).read_bytes(), self.BIG_CONTENT)
+        self.assertFalse(Path(str(self._dest("big.bin")) + ".part").exists())
+        self.assertEqual(
+            sorted(self._media_ranges()),
+            ["bytes=0-1023", "bytes=1024-2047", "bytes=2048-3071",
+             "bytes=3072-4095"])
+        # Cumulative progress is monotonic and reaches the total.
+        self.assertEqual(seen[-1], len(self.BIG_CONTENT))
+        self.assertEqual(seen, sorted(seen))
+
+    def test_concurrent_range_ignored_falls_back(self):
+        self.drive.media_plan[self.BIG_ID] = [
+            ("resp", 200, self.BIG_CONTENT, {})] * 4
+        out = self._download_big()
+        self.assertEqual(Path(out["path"]).read_bytes(), self.BIG_CONTENT)
+        ranges = self._media_ranges()
+        self.assertTrue(any(r and r.startswith("bytes=") for r in ranges))
+        # The fallback single-stream request carries no Range header.
+        self.assertIn(None, ranges)
+
+    def test_concurrent_shard_failure_falls_back(self):
+        err = urllib.error.HTTPError("http://x", 503, "unavailable", {}, None)
+        self.drive.media_plan[self.BIG_ID] = [("raise", err)] * 8
+        out = self._big_downloader(max_attempts=2).download_file(
+            self.BIG_ID, len(self.BIG_CONTENT), sha(self.BIG_CONTENT),
+            self._dest("big.bin"))
+        self.assertEqual(Path(out["path"]).read_bytes(), self.BIG_CONTENT)
+
+    def test_concurrent_403_fails_closed_no_fallback(self):
+        err = urllib.error.HTTPError("http://x", 403, "forbidden", {}, None)
+        self.drive.media_plan[self.BIG_ID] = [("raise", err)]
+        with self.assertRaises(DriveAuthError):
+            self._download_big()
+        self.assertFalse(self._dest("big.bin").exists())
+        # No no-Range request: the single-stream fallback never ran.
+        self.assertNotIn(None, self._media_ranges())
+
+    def test_concurrent_sha_mismatch_fails_and_no_promotion(self):
+        wrong = sha(b"Z" * len(self.BIG_CONTENT))
+        self.drive.metadata[self.BIG_ID]["sha256"] = wrong
+        with self.assertRaises(DriveRetryExhaustedError):
+            self._big_downloader().download_file(
+                self.BIG_ID, len(self.BIG_CONTENT), wrong,
+                self._dest("big.bin"))
+        self.assertFalse(self._dest("big.bin").exists())
+        self.assertFalse(Path(str(self._dest("big.bin")) + ".part").exists())
+
+    def test_small_file_stays_single_stream(self):
+        out = self._downloader().download_file(
+            self.FILE_ID, len(self.CONTENT), sha(self.CONTENT), self._dest())
+        self.assertEqual(Path(out["path"]).read_bytes(), self.CONTENT)
+        media = [(u, h) for u, h in self.drive.calls if "alt=media" in u]
+        self.assertEqual(len(media), 1)
+        self.assertNotIn("range", media[0][1])
+
+    def test_progress_error_fails_download_no_fallback(self):
+        def _boom(done, total):
+            raise RuntimeError("budget exceeded")
+
+        with self.assertRaises(RuntimeError):
+            self._download_big(on_progress=_boom)
+        self.assertFalse(self._dest("big.bin").exists())
+        # No no-Range request: the progress failure never fell back.
+        self.assertNotIn(None, self._media_ranges())
 
 
 class AuthTests(DownloadTestBase):
@@ -583,14 +723,112 @@ class ControllerRenewalTests(unittest.TestCase):
         args.cache_manifest = str(manifest_path)
         args.run_id = "run-preflight"
         records = []
+        service = _FakeTokenService({"id": "fid-0", "size": "10"})
         with patch("h3_drive_token.mint_readonly_token", return_value=fake_doc), \
                 patch.object(self.hc, "record", lambda data: records.append(data)), \
-                patch.object(DriveDownloader, "get_metadata",
-                             return_value={"size": "10"}):
+                patch("h3_drive_transport.build_token_drive_service",
+                      return_value=service) as build:
             result = self.hc.verify_drive_download_preflight(args)
         self.assertEqual(result["preflight"], "ok")
         self.assertEqual(result["token_id"], token_id_for(SECRET_A))
         self.assertNotIn(SECRET_A, json.dumps(records))
+        # The metadata read went through the token service (requests
+        # transport), not the urllib downloader.
+        build.assert_called_once_with(SECRET_A)
+        self.assertEqual(service.get_kwargs["fileId"], "fid-0")
+
+    def test_preflight_metadata_size_mismatch_fails(self):
+        manifest = {"files": [
+            {"path": "a.safetensors", "drive_file_id": "fid-0",
+             "size": 10, "sha256": sha(b"0123456789"), "server_md5": "x"}]}
+        manifest_path = Path(self.td) / "verified_manifest.json"
+        manifest_path.write_text(json.dumps(manifest))
+        fake_doc = {"access_token": SECRET_A,
+                    "expires_at_utc": "2030-01-01T09:00:00Z",
+                    "token_id": token_id_for(SECRET_A)}
+        args = MagicMock()
+        args.cache_manifest = str(manifest_path)
+        args.run_id = "run-preflight"
+        service = _FakeTokenService({"id": "fid-0", "size": "999"})
+        with patch("h3_drive_token.mint_readonly_token", return_value=fake_doc), \
+                patch.object(self.hc, "record", lambda data: None), \
+                patch("h3_drive_transport.build_token_drive_service",
+                      return_value=service):
+            with self.assertRaises(RuntimeError):
+                self.hc.verify_drive_download_preflight(args)
+
+
+class FileTokenArchiveTests(unittest.TestCase):
+    """TASK-007: verify_drive_file_token_archive — the drive.file token
+    the worker will upload with, proven against the archive root
+    (metadata only, zero writes)."""
+
+    def setUp(self):
+        import h3_controller as hc
+
+        self.hc = hc
+        self.records = []
+        self.record_patch = patch.object(
+            hc, "record", lambda data: self.records.append(data))
+        self.record_patch.start()
+        self.addCleanup(self.record_patch.stop)
+
+    def _doc(self, token):
+        return {"access_token": token,
+                "expires_at_utc": "2030-01-01T09:00:00Z",
+                "token_id": token_id_for(token)}
+
+    def _patches(self, found, service):
+        return (
+            patch("h3_drive_token.mint_file_token",
+                  return_value=self._doc(SECRET_B)),
+            patch("drive_depot.drive_service", return_value=object()),
+            patch("drive_depot.list_named", return_value=found),
+            patch("h3_drive_transport.build_token_drive_service",
+                  return_value=service))
+
+    def test_folder_visible_passes(self):
+        service = _FakeTokenService(
+            {"id": "folder-1", "name": "Muse-H3-Video-Outputs"})
+        p1, p2, p3, p4 = self._patches(
+            [{"id": "folder-1", "name": "Muse-H3-Video-Outputs"}], service)
+        with p1, p2, p3, p4:
+            result = self.hc.verify_drive_file_token_archive()
+        self.assertEqual(result["token_id"], token_id_for(SECRET_B))
+        self.assertEqual(result["archive_folder"], "folder-1")
+        self.assertEqual(result["archive_folder_name"],
+                         "Muse-H3-Video-Outputs")
+        self.assertEqual(service.get_kwargs["fileId"], "folder-1")
+        self.assertNotIn(SECRET_B, json.dumps(self.records))
+
+    def test_folder_missing_defers_to_bootstrap(self):
+        service = _FakeTokenService({})
+        p1, p2, p3, p4 = self._patches([], service)
+        with p1, p2, p3, p4 as build_mock:
+            result = self.hc.verify_drive_file_token_archive()
+        self.assertIsNone(result["archive_folder"])
+        self.assertIn("deferred", result["note"])
+        build_mock.assert_not_called()  # no token service when nothing to probe
+
+    def test_folder_invisible_fails_closed(self):
+        service = _FakeTokenService({"id": "other-id", "name": "other"})
+        p1, p2, p3, p4 = self._patches([{"id": "folder-1"}], service)
+        with p1, p2, p3, p4:
+            with self.assertRaises(RuntimeError):
+                self.hc.verify_drive_file_token_archive()
+
+    def test_token_service_error_fails_closed(self):
+        service = _FakeTokenService({}, error=RuntimeError("403"))
+        p1, p2, p3, p4 = self._patches([{"id": "folder-1"}], service)
+        with p1, p2, p3, p4:
+            with self.assertRaises(RuntimeError):
+                self.hc.verify_drive_file_token_archive()
+
+    def test_mint_failure_surfaces(self):
+        with patch("h3_drive_token.mint_file_token",
+                   side_effect=RuntimeError("invalid_scope")):
+            with self.assertRaises(RuntimeError):
+                self.hc.verify_drive_file_token_archive()
 
 
 class WorkerDownloadTests(unittest.TestCase):

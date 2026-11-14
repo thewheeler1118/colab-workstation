@@ -64,6 +64,15 @@ def validate_poster(p: Path) -> None:
     if not p.is_file() or sha256_file(p) != POSTER_SHA256:
         raise ValueError('Original poster missing or SHA256 mismatch: '+str(p))
 
+def validate_ref_image(p: Path, sha256: str) -> None:
+    """Generic reference-image check: the file must exist and its
+    SHA-256 must equal the spec value. validate_poster above is the
+    frozen A/B fixture case of this check (POSTER_SHA256)."""
+    if not Path(p).is_file():
+        raise ValueError('Reference image missing: '+str(p))
+    if sha256_file(Path(p)).lower() != sha256.lower():
+        raise ValueError('Reference image SHA256 mismatch: '+str(p))
+
 def validate_model_cache_manifest(d: dict) -> None:
     """Metadata alone or CACHE_READY.json flag is insufficient.
     `server_verified` requires independent Drive API retrieval using SAME account,
@@ -86,8 +95,30 @@ def validate_model_cache_manifest(d: dict) -> None:
         if not f.get('hf_revision'): raise ValueError('HF revision must be pinned')
 
 def patch_api_workflow(api: dict, variant: str, poster_name: str='poster.jpg', seed: int=42, run_id: str='') -> dict:
+    """Legacy A/B entry point, kept for historical regression tests.
+
+    It builds the built-in fixture TaskSpec for the variant and
+    delegates to patch_api_workflow_for_spec, so the patched workflow
+    is byte-identical to the old hardcoded path. New code must use
+    patch_api_workflow_for_spec with a TaskSpec instead.
+    """
+    from h3_task_spec import task_spec_for_variant
+
+    spec = task_spec_for_variant(variant, "fixture", poster_name, seed=seed)
+    return patch_api_workflow_for_spec(api, spec, poster_name, poster_name, run_id=run_id)
+
+
+def patch_api_workflow_for_spec(api: dict, spec, ref_image_1_name: str = 'ref_image_1.jpg',
+                                ref_image_2_name: str = 'ref_image_2.jpg', run_id: str = '') -> dict:
     """Patch known OFFICIAL GUI node IDs after ComfyUI's Save(API Format) export.
     We deliberately refuse if IDs/types differ; node drift must be explicitly mapped.
+
+    `spec` is a TaskSpec (see h3_task_spec.py): node 137 <Picture 1>
+    takes ref_image_1, node 139 <Picture 2> takes ref_image_2 (or
+    ref_image_1 when the spec reuses it), node 136 takes the spec
+    prompt and generation parameters, and the SaveVideo filename prefix
+    carries the spec output_prefix + run_id. Nothing here is A/B
+    specific anymore; the A/B values arrive as spec data.
     """
     if 'nodes' in api or not isinstance(api,dict):
         raise ValueError('Expected ComfyUI API format, not UI-format workflow (nodes/links)')
@@ -99,18 +130,19 @@ def patch_api_workflow(api: dict, variant: str, poster_name: str='poster.jpg', s
         node=out.get(key)
         if not isinstance(node,dict) or node.get('class_type')!=typ or not isinstance(node.get('inputs'),dict):
             raise ValueError(f'Official workflow API node contract mismatch: {key} expected {typ}')
-    # Keep two references in official template, both bound to the original poster.
-    out['137']['inputs']['image']=poster_name
-    out['139']['inputs']['image']=poster_name
+    # Two references in the official template: node 137 is the main
+    # (character/identity) reference, node 139 the scene/style auxiliary.
+    out['137']['inputs']['image']=ref_image_1_name
+    out['139']['inputs']['image']=ref_image_2_name
     node=out['136']['inputs']
-    node['prompt']=prompt_for(variant)
-    node['width']=WIDTH
-    node['height']=HEIGHT
-    node['length']=ANIMATION_FRAMES
+    node['prompt']=spec.prompt
+    node['width']=spec.width
+    node['height']=spec.height
+    node['length']=spec.animation_frames
     node['ref_image_size']='match'
-    out['124']['inputs']['steps']=STEPS
+    out['124']['inputs']['steps']=spec.steps
     out['124']['inputs']['scheduler']='beta'
-    out['129']['inputs']['noise_seed']=seed
+    out['129']['inputs']['noise_seed']=spec.seed
     out['129']['inputs'].pop('control_after_generate',None)
     out['146']['inputs']['value']=False
     # Non-Turbo production: the Turbo LoRA branch is dead by construction
@@ -127,21 +159,21 @@ def patch_api_workflow(api: dict, variant: str, poster_name: str='poster.jpg', s
         del out['145']
     if '141' in out and out['141'].get('class_type')=='ComfySwitchNode':
         out['141']['inputs']['on_true']=['127',0]
-    # SaveVideo filename carries variant + RUN_ID, so history/rescue can
+    # SaveVideo filename carries output_prefix + RUN_ID, so history/rescue can
     # prove a file belongs to this run (TASK-002 §4.2). Without a run_id
     # the legacy prefix is kept (existing tests / offline callers).
-    out['92']['inputs']['filename_prefix'] = f'muse_h3_{variant}_{run_id}' if run_id else 'muse_h3_'+variant
+    out['92']['inputs']['filename_prefix'] = f'muse_h3_{spec.output_prefix}_{run_id}' if run_id else 'muse_h3_'+spec.output_prefix
     out['127']['inputs']['unet_name']='minimax_h3_ref2va_pruned_int8_convrot.safetensors'
     out['128']['inputs']['clip_name']='qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors'
     # API export can connect these via Primitive* nodes; replace links, not node IDs.
     if '138' in out and out['138'].get('class_type')=='PrimitiveStringMultiline':
-        out['138']['inputs']['value']=prompt_for(variant)
+        out['138']['inputs']['value']=spec.prompt
     if '143' in out and out['143'].get('class_type')=='PrimitiveInt':
-        out['143']['inputs']['value']=STEPS
+        out['143']['inputs']['value']=spec.steps
     if '132' in out and out['132'].get('class_type')=='PrimitiveFloat':
-        out['132']['inputs']['value']=ANIMATION_FRAMES/FPS
+        out['132']['inputs']['value']=spec.animation_frames/spec.fps
     # If a grouped node uses linked inputs, enforce literal overrides explicitly.
     for key in ('width','height','length','prompt'):
         if isinstance(node[key],list): raise ValueError('Unresolved reference to '+key)
-    if ANIMATION_FRAMES % 17 != 5: raise ValueError('MiniMax H3 frame rule violated')
+    if spec.animation_frames % 17 != 5: raise ValueError('MiniMax H3 frame rule violated')
     return out

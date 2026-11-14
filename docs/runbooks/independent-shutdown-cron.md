@@ -29,20 +29,22 @@ observation.
 ## Sample job body (one cron per production task)
 
 Scope: exactly one `production_task_id` (the task the user authorised
-a GPU for). The executor itself does not filter by task — the cron
-body must name the task so the report stays scoped, and the operator
-removes the cron when the task ends.
+a GPU for). The executor enforces the scope itself (TASK-007): a stop
+pass without `--production-task-id` is refused outright (exit 2, no
+stop attempted), and an audit pass with one reports only that task's
+leases. The operator removes the cron when the task ends.
 
 ```
 Every 5 minutes, during production task <TASK_ID> only:
 1. cd ~/workspace/colab-workstation && git log --oneline -1 (confirm
-   the deployed code is the merged PR-3 main, not an old checkout).
-2. python3 h3_shutdown_executor.py audit
+   the deployed code is the merged main, not an old checkout).
+2. python3 h3_shutdown_executor.py audit --production-task-id <TASK_ID>
    --registry model_cache/h3_gpu_leases.json
    (read-only; report overdue leases, skipped leases, registry source
    and degraded-read flag).
 3. If the audit lists overdue leases for <TASK_ID>, run:
    python3 h3_shutdown_executor.py stop --confirm-stop --max-stops 3
+   --production-task-id <TASK_ID>
    --registry model_cache/h3_gpu_leases.json
 4. Report to the originating chat: stopped session ids (RUN_IDs),
    pending leases with reasons, refused leases, and the executor's
@@ -63,10 +65,12 @@ The cron never creates a GPU, never runs inference, never allocates.
 1. Sync the production checkout to the merged PR-3 main (the executor
    must be the reviewed code, not a branch tip).
 2. Run the executor once in audit mode against the live registry path
-   and confirm it reads the Drive mirror (registry_source: mirror) for
-   a lease created by a real allocation. (Needs a real allocation to
-   have happened first; the first live mirror write happens at that
-   allocation, inside `run_variant`.)
+   (`python3 h3_shutdown_executor.py audit --production-task-id
+   <TASK_ID> --registry model_cache/h3_gpu_leases.json`) and confirm it
+   reads the Drive mirror (registry_source: mirror) for a lease created
+   by a real allocation. (Needs a real allocation to have happened
+   first; the first live mirror write happens at that allocation,
+   inside `run_variant`.)
 3. Create the cron with the job body above, scoped to the task id.
 4. Kill-test (authorized separately): during a real production run,
    stop the controller + watchdog locally (or wait for a VM restart)
@@ -81,8 +85,9 @@ The cron never creates a GPU, never runs inference, never allocates.
 1. User approves creating the cron (a background job that stops cloud
    GPUs autonomously).
 2. User approves the executor's stop authority: registry leases only,
-   owner-matched to this host's ADC, past their final deadline, max 3
-   stops per pass.
+   scoped to the approved production_task_id, owner-matched to this
+   host's ADC, past their final deadline (or past the emergency cap
+   when unfinalised, TASK-007), max 3 stops per pass.
 3. User approves the live kill-test (step 4) and the replacement test
    (step 5) as separate live-GPU authorizations, each with its own
    task id and CU budget.

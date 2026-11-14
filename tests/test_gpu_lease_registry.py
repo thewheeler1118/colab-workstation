@@ -321,5 +321,117 @@ class ImportTests(unittest.TestCase):
                          ["h3_managed_sessions.json"])
 
 
+class EmergencyCapTests(RegistryTestBase):
+    """TASK-007: register_lease writes the absolute physical cap
+    emergency_deadline_utc = started + max_wall_sec + 900 s."""
+
+    def test_register_writes_emergency_deadline(self):
+        lease = self._lease(started_at_utc="2026-11-13T06:00:00+00:00",
+                            max_wall_sec=3600)
+        # 06:00 + 3600 s + 900 s grace = 07:15.
+        self.assertEqual(lease["emergency_deadline_utc"],
+                         "2026-11-13T07:15:00+00:00")
+
+    def test_register_without_max_wall_sec_has_no_emergency_cap(self):
+        lease = self._lease()
+        self.assertIsNone(lease["emergency_deadline_utc"])
+
+    def test_update_deadline_preserves_emergency_cap(self):
+        lease = self._lease(started_at_utc="2026-11-13T06:00:00+00:00",
+                            max_wall_sec=3600)
+        self.assertEqual(lease["emergency_deadline_utc"],
+                         "2026-11-13T07:15:00+00:00")
+        updated = self.reg.update_deadline("muse-h3-aaa", DEADLINE, final=True)
+        self.assertTrue(updated["deadline_final"])
+        self.assertEqual(updated["emergency_deadline_utc"],
+                         "2026-11-13T07:15:00+00:00")
+
+    def test_reregister_recomputes_emergency_cap(self):
+        self._lease(started_at_utc="2026-11-13T06:00:00+00:00",
+                    max_wall_sec=3600)
+        again = self._lease(started_at_utc="2026-11-13T06:00:00+00:00",
+                            max_wall_sec=7200)
+        self.assertEqual(again["emergency_deadline_utc"],
+                         "2026-11-13T08:15:00+00:00")
+        self.assertEqual(again["version"], 2)
+
+    def test_mirror_pending_accessor(self):
+        self.mirror.fail_writes = 99
+        self._lease()
+        self.assertTrue(self.reg.mirror_pending())
+        self.mirror.fail_writes = 0
+        self.reg.sync_mirror()
+        self.assertFalse(self.reg.mirror_pending())
+
+
+class UpdateDeadlineFailClosedTests(unittest.TestCase):
+    """TASK-007: h3_controller._update_gpu_lease_deadline is fail-closed
+    on a local registry write failure (raises into the outer finally,
+    which stops the session); only a Drive mirror failure degrades to
+    a warning event."""
+
+    def setUp(self):
+        import h3_controller as hc
+
+        self.hc = hc
+        self.records = []
+        self.sleep_patch = patch.object(hc.time, "sleep", lambda s: None)
+        self.sleep_patch.start()
+        self.addCleanup(self.sleep_patch.stop)
+        self.record_patch = patch.object(
+            hc, "record", lambda data: self.records.append(data))
+        self.record_patch.start()
+        self.addCleanup(self.record_patch.stop)
+
+    def _hook(self, registry):
+        with patch.object(self.hc, "_lease_registry", return_value=registry):
+            return self.hc._update_gpu_lease_deadline(
+                "muse-h3-aaa", "2026-11-13T09:00:00+00:00")
+
+    def test_local_write_failure_raises_after_retries(self):
+        class FailingRegistry:
+            def __init__(self):
+                self.calls = 0
+
+            def update_deadline(self, *a, **k):
+                self.calls += 1
+                raise OSError("disk full")
+
+            def mirror_pending(self):
+                return False
+
+        reg = FailingRegistry()
+        with self.assertRaises(OSError):
+            self._hook(reg)
+        self.assertEqual(reg.calls, 3)
+        events = [r["event"] for r in self.records]
+        self.assertIn("lease_deadline_sync_failed", events)
+
+    def test_mirror_pending_is_a_warning_not_a_raise(self):
+        class PendingMirrorRegistry:
+            def update_deadline(self, *a, **k):
+                return {"session_id": "muse-h3-aaa"}
+
+            def mirror_pending(self):
+                return True
+
+        self._hook(PendingMirrorRegistry())  # must not raise
+        events = [r["event"] for r in self.records]
+        self.assertIn("lease_mirror_pending", events)
+        self.assertNotIn("lease_deadline_sync_failed", events)
+
+    def test_missing_lease_is_a_warning_not_a_raise(self):
+        class MissingLeaseRegistry:
+            def update_deadline(self, *a, **k):
+                return None
+
+            def mirror_pending(self):
+                return False
+
+        self._hook(MissingLeaseRegistry())  # must not raise
+        events = [r["event"] for r in self.records]
+        self.assertIn("lease_deadline_missing", events)
+
+
 if __name__ == "__main__":
     unittest.main()

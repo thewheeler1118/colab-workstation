@@ -49,6 +49,7 @@ from h3_mount_timeline import (
     summarize_timeline,
 )
 from h3_remote_worker import (
+    _download_progress,
     check_restore_capacity,
     estimate_restore,
     project_restore_throughput,
@@ -415,6 +416,40 @@ class RestoreCapacityTest(unittest.TestCase):
         self.assertTrue(est["ok"])
         with self.assertRaises(RuntimeError):
             project_restore_throughput(TOTAL_BYTES, 1_000_000, 0.1, rate_cu_h=10.05, budget_cu=2.0)
+
+
+class DownloadProgressMilestoneTest(unittest.TestCase):
+    """TASK-007: _download_progress fires on non-multiple ``done``
+    values and advances its milestone; the throughput projection
+    still runs exactly once per restore."""
+
+    def test_fires_on_non_multiple_done_and_advances(self):
+        milestone = [256 * 1024 * 1024]
+        projected = [False]
+        calls = []
+        with mock.patch("h3_remote_worker.project_restore_throughput",
+                        side_effect=lambda *a, **k: calls.append(a)):
+            # Below the first milestone: silent.
+            _download_progress("rel", 100 * 1024 * 1024, TOTAL_BYTES, 0.0,
+                               projected, None, None, milestone)
+            self.assertEqual(calls, [])
+            # 300 MiB is NOT a multiple of 256 MiB: the old modulo
+            # test would have skipped the projection entirely.
+            _download_progress("rel", 300 * 1024 * 1024, TOTAL_BYTES, 0.0,
+                               projected, None, None, milestone)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(milestone[0], 512 * 1024 * 1024)
+            # Between milestones: quiet, no second projection.
+            _download_progress("rel", 400 * 1024 * 1024, TOTAL_BYTES, 0.0,
+                               projected, None, None, milestone)
+            self.assertEqual(len(calls), 1)
+            # Second boundary crossed: prints, but the projection
+            # stays once-only.
+            _download_progress("rel", 600 * 1024 * 1024, TOTAL_BYTES, 0.0,
+                               projected, None, None, milestone)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(milestone[0], 768 * 1024 * 1024)
+            self.assertTrue(projected[0])
 
 
 def _fake_popen_factory(chunks, returncode, timeout_first=False):

@@ -21,7 +21,12 @@ Failure posture (fail closed):
   (`deadline_final=True`, set by the post-probe deadline update). A
   lease whose deadline update never landed keeps the earlier initial
   deadline and is NEVER stopped by the executor — stopping on a stale
-  early deadline could kill a healthy run.
+  early deadline could kill a healthy run. The exception is the
+  absolute physical cap `emergency_deadline_utc` (TASK-007): once the
+  wall time started + max_wall_sec + 900 s has passed, the executor
+  may stop the lease even when it never finalised, because no session
+  can legitimately live that long. Without an emergency cap (leases
+  registered before TASK-007) the old never-stop rule still applies.
 - Marking stopped requires a confirmed STOPPED verdict, exactly like
   `h3_session_watchdog.mark_session_stopped` (TASK-006 P0-A).
 """
@@ -44,6 +49,26 @@ REGISTRY_FOLDER_NAME = "Muse-H3-Lease-Registry"
 REGISTRY_FILE_NAME = "h3_gpu_leases.json"
 CLAIM_TTL_SEC = 15 * 60
 MIRROR_MAX_ATTEMPTS = 2
+# TASK-007: grace past the session's maximum wall time before the
+# emergency cap bites. A session can never legitimately live longer
+# than started_at + max_wall_sec + this grace (allocation + cleanup).
+EMERGENCY_GRACE_SEC = 900
+
+
+def _emergency_deadline_utc(started_at_utc: str,
+                            max_wall_sec) -> str | None:
+    """Absolute physical cap for a lease whose deadline never
+    finalised: started_at + max_wall_sec + EMERGENCY_GRACE_SEC. None
+    when no wall bound is known (callers that predate TASK-007): the
+    executor then keeps the old never-stop rule for that lease."""
+    if max_wall_sec is None:
+        return None
+    import datetime
+
+    started = datetime.datetime.fromisoformat(
+        str(started_at_utc).replace("Z", "+00:00"))
+    return (started + datetime.timedelta(
+        seconds=float(max_wall_sec) + EMERGENCY_GRACE_SEC)).isoformat()
 
 
 def _utc_now() -> str:
@@ -226,16 +251,32 @@ class LeaseRegistry:
             return doc
         return self._mirror_write_best_effort(doc)
 
+    def mirror_pending(self) -> bool:
+        """True when the last mirror write is still pending
+        (best-effort). Callers use it to warn, never to block: the
+        local write is the authority, the mirror is a copy."""
+        with _state_lock(self.path):
+            return bool(self._load_local().get("mirror_pending"))
+
     # -- leases -------------------------------------------------------
 
     def register_lease(self, session_id: str, run_id: str,
                        production_task_id: str, gpu_model: str,
                        stop_deadline_utc: str, budget_cap_cu: float,
-                       owner_id: str, started_at_utc: str | None = None) -> dict:
+                       owner_id: str, started_at_utc: str | None = None,
+                       max_wall_sec=None) -> dict:
         """Create (or re-create) a lease. The local write is REQUIRED
         and raises on failure; the mirror write is best-effort. The
         initial deadline is NOT final: the executor never stops a lease
-        until the post-probe deadline update marks it final."""
+        until the post-probe deadline update marks it final — except
+        past `emergency_deadline_utc` (TASK-007), the absolute physical
+        cap started_at + max_wall_sec + 900 s, past which even an
+        unfinalised lease is stoppable. `max_wall_sec` is the session's
+        maximum wall time; when it is not supplied no emergency cap is
+        recorded and the old never-stop rule applies to that lease."""
+        started = started_at_utc or _utc_now()
+        emergency = _emergency_deadline_utc(started, max_wall_sec)
+
         def _reg(doc, leases):
             old = next((x for x in leases
                         if x.get("session_id") == session_id), None)
@@ -247,9 +288,10 @@ class LeaseRegistry:
                 "production_task_id": production_task_id,
                 "owner_id": owner_id,
                 "gpu_model": gpu_model,
-                "started_at_utc": started_at_utc or _utc_now(),
+                "started_at_utc": started,
                 "stop_deadline_utc": stop_deadline_utc,
                 "deadline_final": False,
+                "emergency_deadline_utc": emergency,
                 "budget_cap_cu": float(budget_cap_cu),
                 "last_confirmed_state": "ACTIVE",
                 "last_audit_at_utc": _utc_now(),

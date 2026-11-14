@@ -521,7 +521,7 @@ class ResumeLiveSessionTest(_ResumeBase):
                                   return_value={"session": SESSION, "stopped_confirmed": True})
         # The mocked download writes the file it claims to have fetched:
         # the idempotent deliver re-proves the local file (TASK-005 §5).
-        def _fake_download(session, variant, run_id):
+        def _fake_download(session, variant, run_id, spec=None):
             mp4 = self.out_root / run_id / f"{variant}.mp4"
             mp4.parent.mkdir(parents=True, exist_ok=True)
             mp4.write_bytes(b"fake-mp4")
