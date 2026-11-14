@@ -775,14 +775,26 @@ class DriveDownloader:
                     raise exc
             if errors:
                 return False  # no Range support, or a shard gave up
-            with part.open("wb") as out:
-                for shard_path in shard_paths:
+            # TASK-007.1: merge without a second full copy. The old code
+            # opened a fresh .part and copied every shard into it while
+            # all shards still existed — for the 25.3 GB main weight
+            # that held ~70 GB at once, past the 45.1 GB restore
+            # capacity gate (ENOSPC risk). Instead, move shard 0 into
+            # place with zero-copy os.replace, then append each later
+            # shard and unlink it immediately: the extra disk peak is
+            # one shard, not the whole file. A mid-merge failure leaves
+            # a valid prefix in .part (resume-safe) and the finally
+            # below still cleans any shard that was not yet released.
+            os.replace(shard_paths[0], part)
+            with part.open("ab") as out:
+                for shard_path in shard_paths[1:]:
                     with shard_path.open("rb") as f:
                         while True:
                             chunk = f.read(self.chunk_size)
                             if not chunk:
                                 break
                             out.write(chunk)
+                    shard_path.unlink(missing_ok=True)
             return True
         finally:
             for shard_path in shard_paths:

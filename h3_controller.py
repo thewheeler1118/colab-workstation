@@ -1457,6 +1457,22 @@ def _manifest_update(run_id: str, **kwargs) -> None:
             pass
 
 
+def _current_source_commit() -> str:
+    """The commit this controller code came from (TASK-007.1, fix 3).
+    Delegates to h3_environment.resolve_source_commit: git HEAD in a
+    checkout, else the sync's RELEASE_COMMIT file in a non-git
+    production dir, else "". The old code ran `git rev-parse HEAD`
+    inline here and in _resume_run, which returned "" in production
+    (no .git) — run manifests recorded an empty code_commit and the
+    resume version check silently skipped."""
+    try:
+        from h3_environment import resolve_source_commit
+
+        return resolve_source_commit(ROOT)
+    except Exception:
+        return ""
+
+
 def _manifest_create(args, ledger, spec=None) -> None:
     """Best-effort manifest creation at task authorization (TASK-005
     §4.1). Never raises into the run. The TaskSpec (when given) is
@@ -1465,16 +1481,10 @@ def _manifest_create(args, ledger, spec=None) -> None:
     the spec output_prefix."""
     try:
         import hashlib
-        import subprocess
 
         from h3_run_manifest import create_run_manifest, update_run
 
-        try:
-            code_commit = subprocess.run(
-                ["git", "rev-parse", "HEAD"], cwd=str(ROOT),
-                capture_output=True, text=True, timeout=10).stdout.strip()
-        except Exception:
-            code_commit = ""
+        code_commit = _current_source_commit()
 
         def _sha(path):
             try:
@@ -2183,15 +2193,11 @@ def _resume_run(args) -> dict:
         return _resume_archive_only(args, manifest)
     # Code version: resume only with the exact code the run started with.
     # A synced newer controller is a new decision, not a silent upgrade
-    # of a half-finished run.
-    try:
-        import subprocess
-
-        current_commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=str(ROOT), capture_output=True,
-            text=True, timeout=10).stdout.strip()
-    except Exception:
-        current_commit = ""
+    # of a half-finished run. The current commit resolves through
+    # _current_source_commit(), so the check also works in a non-git
+    # production dir (RELEASE_COMMIT), where the old inline git call
+    # returned "" and the check silently skipped.
+    current_commit = _current_source_commit()
     started_commit = manifest.get("code_commit") or ""
     if started_commit and current_commit and started_commit != current_commit:
         return {"resumed": False, "run_id": run_id,

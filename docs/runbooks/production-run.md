@@ -10,12 +10,15 @@ an old authorisation.
 
 1. `./scripts/check_sessions.sh` — expect no active sessions and a known balance.
 2. `./scripts/preflight.sh` — all checks green.
-3. `./scripts/run_h3_ab.sh --confirm-live --task-spec config/<task>.json --production-task-id <task_id> --run-id h3-<UTC>-<suffix>`
+3. `./scripts/run_h3_task.sh --confirm-live --task-spec config/<task>.json --production-task-id <task_id> --run-id h3-<UTC>-<suffix>`
    (run-id format: h3-YYYYMMDDTHHMMSSZ-xxxxxx, see h3_controller.create_run_id).
    The task is declared in the spec file — see
    `docs/runbooks/generic-task-spec.md` and `config/task_spec.example.json`.
    The old `--variant A|B` form still works as a built-in test-fixture
    adapter only; new tasks always use `--task-spec`.
+   The script resolves the production venv python and exports the
+   matching `COLAB_CLI_PATH` itself (TASK-007.1); the legacy
+   `run_h3_ab.sh` name is a thin wrapper that forwards to it.
    The script forwards --execute --confirm-gpu --authorize-task-gpu --allow-g4
    --allow-a100-highmem --fresh-inference. The run uses the noninteractive
    Drive download path by default (TASK-006 P0-B): the controller mints a

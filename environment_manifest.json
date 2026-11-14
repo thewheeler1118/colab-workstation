@@ -8,6 +8,14 @@
   "cli_wheel_note": "No wheel file is kept on this VM; the pin is enforced by version + installed client hash + both patch markers, not by a wheel hash.",
   "cli_post_body_patch": true,
   "cli_drivemount_timeout_patch": true,
+  "source_commit": null,
+  "control_plane_modules": {
+    "google.auth": true,
+    "googleapiclient": true,
+    "requests": true,
+    "certifi": true,
+    "yaml": true
+  },
   "python_major_minor": "3.12",
   "python_major_minor_allowed": [
     "3.11",

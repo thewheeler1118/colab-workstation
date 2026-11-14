@@ -1,6 +1,6 @@
 # Preflight runbook (no GPU, no CU)
 
-Run `./scripts/preflight.sh` (or `python3 h3_controller.py preflight`).
+Run `./scripts/preflight.sh` (or `COLAB_CLI_PATH=$PWD/.venv-colab-cli/bin/colab .venv-colab-cli/bin/python h3_controller.py preflight` — the system python3 has no google libs).
 Preflight is read-only plus live `colab usage` / `colab sessions` reads; it
 never allocates a session.
 

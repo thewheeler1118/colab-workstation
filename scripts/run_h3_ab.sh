@@ -1,53 +1,6 @@
 #!/usr/bin/env bash
-# run_h3_ab.sh — LIVE GPU RUN. Refuses to do anything unless the operator
-# explicitly passes --confirm-live (plus --run-id and --production-task-id
-# and exactly one of --task-spec / --variant).
-# Standard (generic) usage:
-#   ./scripts/run_h3_ab.sh --confirm-live --production-task-id <TASK_ID> \
-#       --task-spec <spec.json> --run-id h3-YYYYMMDDTHHMMSSZ-xxxxxx
-# Legacy A/B fixture usage:
-#   ./scripts/run_h3_ab.sh --confirm-live --production-task-id h3-ab-20261112 \
-#       --variant A --run-id h3-YYYYMMDDTHHMMSSZ-xxxxxx
-#   New task (no ledger yet): add --authorize-new-task. Without it the
-#   controller refuses to grant a fresh 30 CU budget (TASK-002 §5.2).
-#   Continuing the historical task h3-ab-20261111 (e.g. the B re-run):
-#   pass --production-task-id h3-ab-20261111 explicitly, no new flag.
-# Forwards to: python3 h3_controller.py run --execute --confirm-gpu
-#   --authorize-task-gpu --allow-g4 --allow-a100-highmem
-#   --fresh-inference
-#   --task-spec SPEC | --variant A|B --run-id ID --production-task-id ID [--authorize-new-task]
-# The controller itself enforces: 30 CU task budget, 25 CU per-session cap,
-# G4_THEN_A100_HIGHMEM policy, pinned ComfyUI commit, and (TASK-006 P0-B)
-# the noninteractive Drive download preflight before allocation. The
-# legacy interactive mount path needs --drive-source mount plus
-# --approve-interactive-drive-mount and a TTY; this script does not pass
-# them, so it runs the download path by default.
-# This script creates a PAID GPU session and spends CU. Do not run it from CI.
+# run_h3_ab.sh — legacy name for scripts/run_h3_task.sh (TASK-007.1).
+# Thin compatibility wrapper: forwards every argument unchanged. New
+# callers should use run_h3_task.sh directly.
 set -euo pipefail
-cd "$(dirname "$0")/.."
-CONFIRM_LIVE=0; VARIANT=""; TASK_SPEC=""; RUN_ID=""; TASK_ID=""; AUTHORIZE_NEW_TASK=0
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --confirm-live) CONFIRM_LIVE=1; shift ;;
-    --variant) VARIANT="$2"; shift 2 ;;
-    --task-spec) TASK_SPEC="$2"; shift 2 ;;
-    --run-id) RUN_ID="$2"; shift 2 ;;
-    --production-task-id) TASK_ID="$2"; shift 2 ;;
-    --authorize-new-task) AUTHORIZE_NEW_TASK=1; shift ;;
-    *) echo "unknown argument: $1" >&2; exit 2 ;;
-  esac
-done
-if [ "$CONFIRM_LIVE" -ne 1 ]; then
-  echo "REFUSED: run_h3_ab.sh requires --confirm-live. This creates a paid GPU session." >&2
-  echo "Usage: $0 --confirm-live --production-task-id TASK (--task-spec SPEC | --variant A|B) --run-id h3-..." >&2
-  exit 2
-fi
-if [ -n "$VARIANT" ] && [ -n "$TASK_SPEC" ]; then echo "REFUSED: --variant and --task-spec conflict; pass exactly one" >&2; exit 2; fi
-if [ -z "$VARIANT" ] && [ -z "$TASK_SPEC" ]; then echo "REFUSED: --task-spec <spec.json> or --variant A|B is required" >&2; exit 2; fi
-if [ -n "$VARIANT" ] && [ "$VARIANT" != "A" ] && [ "$VARIANT" != "B" ]; then echo "REFUSED: --variant must be A or B" >&2; exit 2; fi
-if [ -z "$RUN_ID" ]; then echo "REFUSED: --run-id is required" >&2; exit 2; fi
-if [ -z "$TASK_ID" ]; then echo "REFUSED: --production-task-id is required (the historical default is never reused silently)" >&2; exit 2; fi
-EXTRA=()
-if [ "$AUTHORIZE_NEW_TASK" -eq 1 ]; then EXTRA+=(--authorize-new-task); fi
-if [ -n "$TASK_SPEC" ]; then EXTRA+=(--task-spec "$TASK_SPEC"); else EXTRA+=(--variant "$VARIANT"); fi
-exec python3 h3_controller.py run --execute --confirm-gpu --authorize-task-gpu --allow-g4 --allow-a100-highmem --fresh-inference --run-id "$RUN_ID" --production-task-id "$TASK_ID" "${EXTRA[@]}"
+exec "$(dirname "$0")/run_h3_task.sh" "$@"

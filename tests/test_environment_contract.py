@@ -111,6 +111,61 @@ class GenerateTest(unittest.TestCase):
         self.assertFalse(m["cli_post_body_patch"])
         self.assertFalse(m["cli_drivemount_timeout_patch"])
 
+    def test_generate_records_control_plane_modules(self):
+        # TASK-007.1: the manifest records one bool per control-plane
+        # module, probed in the CLI's interpreter (here: the current
+        # one, since the fake CLI has no sibling python). Values are
+        # environment-dependent; keys and bool type are the contract.
+        with tempfile.TemporaryDirectory() as d:
+            colab, roots = _fake_env(Path(d), patched=True)
+            m = he.generate_environment_manifest(cli_exe=str(colab),
+                                                 search_roots=roots)
+        self.assertEqual(set(m["control_plane_modules"]),
+                         set(he.CONTROL_PLANE_MODULES))
+        self.assertTrue(all(isinstance(v, bool)
+                            for v in m["control_plane_modules"].values()))
+
+    def test_generate_records_source_commit_from_release_commit(self):
+        # TASK-007.1: in a synced dir the generator reads the sync's
+        # RELEASE_COMMIT file (he.ROOT is patched to the fake dir, so
+        # no other repo file is consulted).
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "RELEASE_COMMIT").write_text(
+                "deadbeef" * 5 + "\n", encoding="utf-8")
+            with mock.patch.object(he, "ROOT", root):
+                m = he.generate_environment_manifest(cli_exe="/nonexistent/colab",
+                                                     search_roots=[])
+        self.assertEqual(m["source_commit"], "deadbeef" * 5)
+
+    def test_generate_explicit_source_commit_wins(self):
+        m = he.generate_environment_manifest(cli_exe="/nonexistent/colab",
+                                             search_roots=[],
+                                             source_commit="feedface" * 5)
+        self.assertEqual(m["source_commit"], "feedface" * 5)
+
+    def test_resolve_source_commit_git_repo(self):
+        # The repo checkout itself: the live HEAD, nothing invented.
+        import subprocess as sp
+
+        head = sp.run(["git", "rev-parse", "HEAD"], cwd=str(ROOT),
+                      capture_output=True, text=True,
+                      timeout=10).stdout.strip()
+        self.assertTrue(head)
+        self.assertEqual(he.resolve_source_commit(), head)
+
+    def test_resolve_source_commit_release_commit_fallback(self):
+        # No .git: the sync's RELEASE_COMMIT file is the truth.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "RELEASE_COMMIT").write_text("cafe" * 10 + "\n",
+                                                 encoding="utf-8")
+            self.assertEqual(he.resolve_source_commit(root), "cafe" * 10)
+
+    def test_resolve_source_commit_unknown_is_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(he.resolve_source_commit(Path(d)), "")
+
 
 class VerifyTest(unittest.TestCase):
     def _manifest(self, **over):
@@ -123,6 +178,9 @@ class VerifyTest(unittest.TestCase):
             "ffmpeg_present": True,
             "ffprobe_present": True,
             "drive_transport": {"transport": "requests"},
+            "control_plane_modules": {m: True
+                                      for m in he.CONTROL_PLANE_MODULES},
+            "source_commit": None,
         }
         base.update(over)
         return base
@@ -138,6 +196,8 @@ class VerifyTest(unittest.TestCase):
             "ffprobe_present": True,
             "cli_executable": "/fake/bin/colab",
             "drive_transport": {"transport": "requests"},
+            "control_plane_modules": {m: True
+                                      for m in he.CONTROL_PLANE_MODULES},
         }
         base.update(over)
         return base
@@ -146,7 +206,38 @@ class VerifyTest(unittest.TestCase):
         with mock.patch.object(he, "_live_environment", return_value=self._live()):
             report = he.verify_environment(manifest=self._manifest())
         self.assertTrue(report["ok"])
-        self.assertEqual(len(report["checked"]), 8)
+        # 6 gated fields + python + transport + 5 control-plane modules
+        # + source_commit = 14 checked entries.
+        self.assertEqual(len(report["checked"]), 14)
+
+    def test_missing_module_names_field(self):
+        live = self._live(control_plane_modules={
+            m: True for m in he.CONTROL_PLANE_MODULES})
+        live["control_plane_modules"]["yaml"] = False
+        with mock.patch.object(he, "_live_environment", return_value=live):
+            with self.assertRaisesRegex(he.EnvironmentMismatch,
+                                        "control_plane_module\\.yaml"):
+                he.verify_environment(manifest=self._manifest())
+
+    def test_source_commit_mismatch_names_field(self):
+        manifest = self._manifest(source_commit="a" * 40)
+        with mock.patch.object(he, "_live_environment",
+                               return_value=self._live()), \
+                mock.patch.object(he, "resolve_source_commit",
+                                  return_value="b" * 40):
+            with self.assertRaisesRegex(he.EnvironmentMismatch,
+                                        "source_commit.*a{40}.*b{40}"):
+                he.verify_environment(manifest=manifest)
+
+    def test_source_commit_absent_in_manifest_passes(self):
+        manifest = self._manifest()
+        del manifest["source_commit"]
+        with mock.patch.object(he, "_live_environment",
+                               return_value=self._live()), \
+                mock.patch.object(he, "resolve_source_commit",
+                                  return_value="c" * 40):
+            report = he.verify_environment(manifest=manifest)
+        self.assertTrue(report["ok"])
 
     def test_transport_mismatch_names_field(self):
         with mock.patch.object(he, "_live_environment",

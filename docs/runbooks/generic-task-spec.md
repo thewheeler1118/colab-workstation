@@ -44,18 +44,24 @@ at 0 CU.
 
 ## Standard commands (one spec, no code edits)
 
+Controller commands run under the production venv python (the system
+`python3` has no google libs — TASK-007.1). `scripts/run_h3_task.sh`
+resolves the interpreter and `COLAB_CLI_PATH` itself; for direct
+controller calls use `.venv-colab-cli/bin/python` with `COLAB_CLI_PATH`
+set (or `./scripts/preflight.sh`, which resolves the same way).
+
 ```bash
 # 0 CU: plan + preflight (schema, refs, workflow patch, dual-token
 # mint, Drive metadata, live CU balance, active-session check)
-python3 h3_controller.py plan --task-spec config/my-task.json
-python3 h3_controller.py preflight --task-spec config/my-task.json
+COLAB_CLI_PATH=$PWD/.venv-colab-cli/bin/colab .venv-colab-cli/bin/python h3_controller.py plan --task-spec config/my-task.json
+COLAB_CLI_PATH=$PWD/.venv-colab-cli/bin/colab .venv-colab-cli/bin/python h3_controller.py preflight --task-spec config/my-task.json
 
 # Live GPU (needs the user's explicit go-ahead for THAT task):
-./scripts/run_h3_ab.sh --confirm-live --task-spec config/my-task.json \
+./scripts/run_h3_task.sh --confirm-live --task-spec config/my-task.json \
     --production-task-id <task_id> --run-id h3-<UTC>-<suffix>
 
 # Archive a finished local mp4 under the same spec:
-python3 h3_controller.py archive --task-spec config/my-task.json --run-id <run_id>
+COLAB_CLI_PATH=$PWD/.venv-colab-cli/bin/colab .venv-colab-cli/bin/python h3_controller.py archive --task-spec config/my-task.json --run-id <run_id>
 ```
 
 `--production-task-id` is still required on `run` and must equal the
