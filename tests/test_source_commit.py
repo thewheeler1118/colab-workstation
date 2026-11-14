@@ -52,6 +52,10 @@ class ManifestCreateTest(unittest.TestCase):
         self.assertIsNotNone(manifest)
         self.assertEqual(manifest["code_commit"], "cafe" * 10)
 
+    @unittest.skipUnless((ROOT / ".git").exists(),
+                          "not a git checkout (production has no .git; "
+                          "the RELEASE_COMMIT fallback is covered by "
+                          "test_manifest_create_records_release_commit_in_non_git_dir)")
     def test_current_source_commit_is_git_head_in_checkout(self):
         head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(ROOT),
                               capture_output=True, text=True,

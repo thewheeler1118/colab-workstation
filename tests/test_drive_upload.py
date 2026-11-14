@@ -463,10 +463,12 @@ class VerifyTests(UploadTestBase):
 class MintTests(unittest.TestCase):
     """mint_file_token uses the drive.file scope, nothing broader.
 
-    google.auth is NOT installed under system python3, so the tests
-    stub the google.auth package in sys.modules (the same shape the
-    real mint functions import: google.auth.default + the Request
-    transport class).
+    The tests stub the google.auth package in sys.modules (the same
+    shape the real mint functions import: google.auth.default + the
+    Request transport class). The fake is installed UNCONDITIONALLY,
+    overwriting any real google.auth already imported — the production
+    venv has real google libs, and a conditional install would silently
+    test the real ADC path instead of the fake (TASK-007.1).
     """
 
     def _install_fake_google_auth(self, scopes_seen):
@@ -499,15 +501,25 @@ class MintTests(unittest.TestCase):
         google_pkg = types.ModuleType("google")
         google_pkg.__path__ = []
         google_pkg.auth = fake_auth
-        added = []
+        # Install unconditionally, overwriting any real google.auth:
+        # the mint functions import lazily, so sys.modules decides
+        # which implementation they see. Restore on cleanup.
+        saved = {}
         for name, mod in (("google", google_pkg),
                           ("google.auth", fake_auth),
                           ("google.auth.transport", fake_transport),
                           ("google.auth.transport.requests", fake_requests)):
-            if name not in sys.modules:
-                sys.modules[name] = mod
-                added.append(name)
-        self.addCleanup(lambda: [sys.modules.pop(n, None) for n in added])
+            saved[name] = sys.modules.get(name)
+            sys.modules[name] = mod
+
+        def _restore():
+            for name, orig in saved.items():
+                if orig is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = orig
+
+        self.addCleanup(_restore)
 
     def test_file_token_scope(self):
         seen = {}

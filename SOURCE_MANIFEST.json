@@ -420,7 +420,7 @@
     {
       "path": "docs/module_inventory.md",
       "size_bytes": 51006,
-      "sha256": "30d7c00e9a97eeedcc14fbe9c5ada7eb4746a56bbc5ef5d82df46b637d2a6f21",
+      "sha256": "548d35917d6ab2db772c38f59213aeaf3fee769f10b6f64fce773b44d9a44153",
       "role": "Module inventory (this table's source of truth for hashes)"
     },
     {
@@ -635,8 +635,8 @@
     },
     {
       "path": "h3_environment.py",
-      "size_bytes": 20183,
-      "sha256": "9cdd53a0f6295af3c0566bb452215649edd1d173e8595a6e9ac9f72e45edd7cd",
+      "size_bytes": 20433,
+      "sha256": "6db5272e1558696b9b050f94d58e2288833a3d3eb1a113d09135ea84425508d5",
       "role": "Supporting file"
     },
     {
@@ -1025,8 +1025,8 @@
     },
     {
       "path": "tests/test_drive_upload.py",
-      "size_bytes": 30046,
-      "sha256": "9f43a9b08f8f056efbad9140ad80101e69c5ad709502a8bad73c2c7d434dd913",
+      "size_bytes": 30577,
+      "sha256": "f4a0f3b874834c90dea14e50313b991c47e05fa9be7cf63933a98d84d813f101",
       "role": "Tests"
     },
     {
@@ -1037,8 +1037,8 @@
     },
     {
       "path": "tests/test_environment_contract.py",
-      "size_bytes": 14889,
-      "sha256": "6eac3bf9b59e2da22b457ea438f32ca97e5498cb4c2c3cf67ba67bb5ae39ad80",
+      "size_bytes": 15088,
+      "sha256": "84e5c6f4aa41b5a1240716771a099bb51551badf7a9b1c0840d8f2a96fb69ce9",
       "role": "Tests"
     },
     {
@@ -1097,8 +1097,8 @@
     },
     {
       "path": "tests/test_run_h3_task_script.py",
-      "size_bytes": 4520,
-      "sha256": "e8d6cc56e0c4f6938fd8c271ed3d75a56d89ec2c4bdee3ce717dcc194e502a54",
+      "size_bytes": 4555,
+      "sha256": "76390b1d3eb7cab9829b5e626004d99da56d89f5c333c66c9a50a8ab830ea9e8",
       "role": "Tests"
     },
     {
@@ -1127,8 +1127,8 @@
     },
     {
       "path": "tests/test_source_commit.py",
-      "size_bytes": 4266,
-      "sha256": "6b07f9451c5c93d0ce49de7c94afaf6356f9202209e744dff9922dfb135c87f3",
+      "size_bytes": 4550,
+      "sha256": "f28361871715f661a73a3a27aab0607694a54526a14c5cbc1e2a24d1d303b8a7",
       "role": "Tests"
     },
     {

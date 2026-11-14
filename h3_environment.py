@@ -283,9 +283,13 @@ def generate_environment_manifest(cli_exe: str | None = None,
                 break
         if client is not None:
             manifest["cli_client_sha256"] = _sha256_file(client)
-        manifest["cli_post_body_patch"] = _patch_present("cli_post_body_patch", roots or None)
+        # An explicitly-passed empty roots list means "search nothing"
+        # (TASK-007.1): it must NOT fall back to the current
+        # interpreter's site-packages, or an unresolvable CLI would
+        # record the host interpreter's patch markers as its own.
+        manifest["cli_post_body_patch"] = _patch_present("cli_post_body_patch", roots)
         manifest["cli_drivemount_timeout_patch"] = _patch_present(
-            "cli_drivemount_timeout_patch", roots or None)
+            "cli_drivemount_timeout_patch", roots)
     ffmpeg_v = _tool_version("ffmpeg")
     manifest["ffmpeg_present"] = ffmpeg_v is not None
     manifest["ffmpeg_version"] = ffmpeg_v

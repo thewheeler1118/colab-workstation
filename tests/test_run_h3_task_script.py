@@ -45,15 +45,6 @@ class ScriptGateTest(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("conflict", r.stderr)
 
-    def test_full_args_without_venv_refuses_on_interpreter(self):
-        # The repo checkout has no .venv-colab-cli/.venv: the gates pass,
-        # then the interpreter resolution refuses — before any live call.
-        r = self._run("--confirm-live", "--production-task-id", "t-1",
-                      "--task-spec", "config/task_spec.example.json",
-                      "--run-id", "h3-20261114T000000Z-abcdef")
-        self.assertEqual(r.returncode, 2)
-        self.assertIn("no production venv python found", r.stderr)
-
 
 class ScriptResolutionTest(unittest.TestCase):
     def _layout(self, venvs):
@@ -83,6 +74,17 @@ class ScriptResolutionTest(unittest.TestCase):
         return ["--confirm-live", "--production-task-id", "task-0071",
                 "--task-spec", "config/task_spec.example.json",
                 "--run-id", "h3-20261114T000000Z-abcdef"]
+
+    def test_no_venv_refuses_on_interpreter(self):
+        # Full args in a layout with NO venv at all: the gates pass,
+        # then the interpreter resolution refuses — before any live
+        # call. Uses a temp layout (not the repo) because the production
+        # dir legitimately HAS a venv, where the same command would
+        # proceed to the controller instead.
+        root = self._layout([])
+        r = self._run(root, *self._full_args())
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("no production venv python found", r.stderr)
 
     def test_prefers_venv_colab_cli(self):
         root = self._layout([".venv-colab-cli", ".venv"])
