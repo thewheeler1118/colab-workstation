@@ -34,6 +34,15 @@ echo "installing google-colab-cli==0.7.5"
 "$PIP" install --quiet --upgrade pip
 "$PIP" install --quiet "google-colab-cli==0.7.5"
 
+# TASK-007.1: control-plane dependencies the controller needs in THIS
+# interpreter (Drive service + token minting, the requests transport,
+# and the YAML loader). The bare CLI venv lacked google-api-python-client
+# and PyYAML, which made preflight fail on both interpreters (TASK-007
+# acceptance). Pin PyYAML to the version the repo's CI and the system
+# python already use; the rest follow the brief unpinned.
+echo "installing control-plane dependencies"
+"$PIP" install --quiet "google-api-python-client" "google-auth" "requests" "certifi" "pyyaml==6.0.1"
+
 SITE="$("$PY" -c "import site; print(site.getsitepackages()[0])")"
 echo "site-packages: $SITE"
 
@@ -69,6 +78,10 @@ roots = ['$SITE']
 assert cli_post_body_patch_present(roots), 'POST-body patch marker missing after install'
 assert cli_drivemount_timeout_patch_present(roots), 'drivemount-timeout patch marker missing after install'
 print('  both patch markers present')
+"
+"$PY" -c "
+import google.auth, googleapiclient, requests, certifi, yaml
+print('  control-plane modules importable: google.auth, googleapiclient, requests, certifi, yaml')
 "
 echo "OK: $VENV/bin/colab is pinned 0.7.5 + both production patches"
 echo "Use it via COLAB_CLI_PATH=$VENV/bin/colab, or install into the repo .venv"

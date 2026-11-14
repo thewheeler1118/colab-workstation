@@ -119,7 +119,7 @@ python scripts/verify_manifest.py
 ./scripts/verify_shutdown.sh
 
 # LIVE GPU RUN — spends CU, needs explicit operator confirmation + TTY
-./scripts/run_h3_ab.sh --confirm-live --variant A --run-id h3-<UTC>-<suffix>
+./scripts/run_h3_task.sh --confirm-live --task-spec config/my-task.json --production-task-id <task_id> --run-id h3-<UTC>-<suffix>
 ```
 
 ## CI is offline only

@@ -51,7 +51,7 @@ python scripts/check_docs_index.py
 # Live GPU run (spends CU; operator + TTY + explicit confirmation only)
 # --production-task-id is required: a new task id never gets a fresh
 # 30 CU silently; add --authorize-new-task only with user approval.
-./scripts/run_h3_ab.sh --confirm-live --production-task-id h3-ab-20261112 --variant A --run-id h3-<UTC>-<suffix>
+./scripts/run_h3_task.sh --confirm-live --production-task-id h3-ab-20261112 --task-spec config/task_spec.example.json --run-id h3-<UTC>-<suffix>
 ```
 
 ## Making changes

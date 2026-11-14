@@ -31,8 +31,12 @@ def main() -> int:
                         help="Colab CLI executable to record (default: resolver)")
     parser.add_argument("--out", default=str(ENVIRONMENT_MANIFEST_PATH),
                         help="Output path (default: environment_manifest.json)")
+    parser.add_argument("--source-commit", default=None,
+                        help="Source commit to record (default: read the "
+                             "sync's RELEASE_COMMIT file, else None)")
     args = parser.parse_args()
-    manifest = generate_environment_manifest(cli_exe=args.cli_exe)
+    manifest = generate_environment_manifest(cli_exe=args.cli_exe,
+                                             source_commit=args.source_commit)
     out = Path(args.out)
     out.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
                    encoding="utf-8")

@@ -406,6 +406,44 @@ class ConcurrentDownloadTest(DownloadTestBase):
         self.assertEqual(seen[-1], len(self.BIG_CONTENT))
         self.assertEqual(seen, sorted(seen))
 
+    def test_concurrent_merge_releases_shards_one_by_one(self):
+        """TASK-007.1: the merge moves shard 0 into place (zero-copy
+        os.replace) and unlinks each later shard right after appending
+        it — no second full copy, so the extra disk peak is one shard,
+        not the whole file. Final bytes + SHA-256 must be identical,
+        and no shard file may survive."""
+        dest = self._dest("big.bin")
+        part = Path(str(dest) + ".part")
+        shard_paths = [Path(str(part) + f".shard{i}") for i in range(4)]
+        replaces = []
+        unlinks = []
+        real_replace = os.replace
+        real_unlink = Path.unlink
+
+        def _recording_replace(src, dst, *a, **k):
+            replaces.append((str(src), str(dst)))
+            return real_replace(src, dst, *a, **k)
+
+        def _recording_unlink(self, missing_ok=False):
+            if ".shard" in str(self):
+                unlinks.append(str(self))
+            return real_unlink(self, missing_ok=missing_ok)
+
+        with patch.object(os, "replace", _recording_replace), \
+                patch.object(Path, "unlink", _recording_unlink):
+            out = self._download_big()
+        self.assertEqual(Path(out["path"]).read_bytes(), self.BIG_CONTENT)
+        self.assertEqual(out["sha256"], sha(self.BIG_CONTENT))
+        self.assertFalse(part.exists())
+        for p in shard_paths:
+            self.assertFalse(p.exists())
+        # Zero-copy first shard: shard0 was moved into .part, not copied.
+        self.assertIn((str(shard_paths[0]), str(part)), replaces)
+        # Shards 1..3 unlinked by the merge itself (3 calls), then the
+        # finally re-tries all four (4 more): the merge released them
+        # one by one instead of relying on the finally.
+        self.assertGreaterEqual(len(unlinks), 7)
+
     def test_concurrent_range_ignored_falls_back(self):
         self.drive.media_plan[self.BIG_ID] = [
             ("resp", 200, self.BIG_CONTENT, {})] * 4

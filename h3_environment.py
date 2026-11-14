@@ -35,6 +35,13 @@ ROOT = Path(__file__).resolve().parent
 ENVIRONMENT_MANIFEST_PATH = ROOT / "environment_manifest.json"
 GENERATOR_VERSION = 1
 
+# Control-plane modules the controller needs in the interpreter that
+# runs it (TASK-007.1): Drive service + token minting (google.*),
+# the requests transport (requests/certifi), and the spec/config YAML
+# loader (yaml). Recorded by the generator, gated by the verifier.
+CONTROL_PLANE_MODULES = ("google.auth", "googleapiclient", "requests",
+                         "certifi", "yaml")
+
 # Fields the gate enforces. Anything else in the manifest is recorded
 # evidence, not a gate.
 GATED_FIELDS = ("cli_version", "cli_client_sha256", "cli_post_body_patch",
@@ -119,14 +126,97 @@ def _patch_present(check_name: str, search_roots) -> bool:
     return bool(checks[check_name](search_roots))
 
 
+def _probe_python(cli_exe: str | None) -> str | None:
+    """The interpreter that owns the CLI (its venv's bin/python), else
+    the interpreter running this code. The control-plane modules are
+    checked in the interpreter that will actually run the controller —
+    TASK-007.1: the system python3 has no google libs and the bare CLI
+    venv had no Drive client or yaml, so probing the wrong interpreter
+    hides exactly the drift the gate exists to catch."""
+    if cli_exe:
+        exe = Path(cli_exe)
+        for name in ("python", "python3"):
+            candidate = exe.parent / name
+            if candidate.is_file():
+                return str(candidate)
+    return sys.executable or None
+
+
+_CONTROL_PLANE_PROBE = (
+    "import importlib.util, json, sys\n"
+    "def _ok(m):\n"
+    "    try:\n"
+    "        return importlib.util.find_spec(m) is not None\n"
+    "    except Exception:\n"
+    "        return False\n"
+    "print(json.dumps({m: _ok(m) for m in sys.argv[1:]}))\n")
+
+
+def _control_plane_modules(python_exe: str | None) -> dict:
+    """One subprocess: which control-plane modules the probe
+    interpreter can import. A probe that cannot run records all False
+    and the gate fails on it — never invented, never skipped."""
+    if not python_exe:
+        return {m: False for m in CONTROL_PLANE_MODULES}
+    try:
+        out = subprocess.run([python_exe, "-c", _CONTROL_PLANE_PROBE,
+                              *CONTROL_PLANE_MODULES],
+                             capture_output=True, text=True, timeout=60)
+        result = json.loads((out.stdout or "").strip() or "{}")
+        if isinstance(result, dict):
+            return {m: bool(result.get(m, False))
+                    for m in CONTROL_PLANE_MODULES}
+    except Exception:
+        pass
+    return {m: False for m in CONTROL_PLANE_MODULES}
+
+
+def resolve_source_commit(root=None) -> str:
+    """The commit this code came from, without ever guessing
+    (TASK-007.1, fix 3). Git checkout: the live HEAD is the truth.
+    Synced production dir (no .git): the RELEASE_COMMIT file the sync
+    wrote. Anything else: "" — callers treat "" as 'unknown', never
+    as a version. The manifest itself is deliberately NOT a source:
+    trusting it here would let a stale manifest prove itself."""
+    base = Path(root) if root is not None else ROOT
+    # Git first, unconditionally (like the old inline rev-parse): in a
+    # non-repo dir it fails fast with empty stdout and we fall through.
+    # Guarding on .git would skip the call entirely and break callers
+    # that stub subprocess.run (see test_recoverable_controller._git).
+    try:
+        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(base),
+                             capture_output=True, text=True, timeout=10)
+        head = (out.stdout or "").strip()
+        if head:
+            return head
+    except Exception:
+        pass
+    try:
+        release = base / "RELEASE_COMMIT"
+        if release.is_file():
+            text = release.read_text(encoding="utf-8").strip()
+            if text:
+                return text.split()[0]
+    except Exception:
+        pass
+    return ""
+
+
 def generate_environment_manifest(cli_exe: str | None = None,
-                                  search_roots=None) -> dict:
+                                  search_roots=None,
+                                  source_commit: str | None = None) -> dict:
     """Record the live local environment. Never invents a value: a check
     that cannot run records None (or False for the patch markers) and the
     gate fails on it. The manifest is written by
     scripts/generate_environment_manifest.py. `search_roots` is a
     dependency-injection hook for tests; production always derives the
-    roots from the CLI's own interpreter."""
+    roots from the CLI's own interpreter. `source_commit` records the
+    source commit the manifest was generated against: pass it
+    explicitly (--source-commit) or let the generator read the sync's
+    RELEASE_COMMIT file. Git is deliberately NOT auto-read here — the
+    manifest records the sync's claim, and in a git checkout the
+    history is the record, so a pre-commit generation would otherwise
+    bake a stale HEAD into the file."""
     from auth_support import resolve_colab_executable
 
     if cli_exe is None:
@@ -144,6 +234,15 @@ def generate_environment_manifest(cli_exe: str | None = None,
             allowed_python = existing["python_major_minor_allowed"]
     except Exception:
         pass
+    recorded_commit = (source_commit or "").strip() or None
+    if recorded_commit is None:
+        try:
+            release = ROOT / "RELEASE_COMMIT"
+            if release.is_file():
+                text = release.read_text(encoding="utf-8").strip()
+                recorded_commit = text.split()[0] if text else None
+        except Exception:
+            recorded_commit = None
     manifest: dict = {
         "generator_version": GENERATOR_VERSION,
         "cli_version": None,
@@ -156,6 +255,8 @@ def generate_environment_manifest(cli_exe: str | None = None,
                            "both patch markers, not by a wheel hash."),
         "cli_post_body_patch": False,
         "cli_drivemount_timeout_patch": False,
+        "source_commit": recorded_commit,
+        "control_plane_modules": _control_plane_modules(_probe_python(cli_exe)),
         "python_major_minor": f"{sys.version_info.major}.{sys.version_info.minor}",
         "python_major_minor_allowed": allowed_python,
         "python_version": sys.version.split()[0],
@@ -299,5 +400,44 @@ def verify_environment(manifest: dict | None = None,
             f"transport is pinned to requests (PR-7); a revert to httplib2 "
             f"fails on this VM. Regenerate the manifest deliberately in a "
             f"PR if the transport changes.")
+    # TASK-007.1: control-plane modules, probed in the interpreter that
+    # will run the controller. A module recorded importable must stay
+    # importable; a hand-removed package fails here, never at the first
+    # Drive call after a GPU is allocated.
+    expected_modules = manifest.get("control_plane_modules") or {}
+    live_modules = live.get("control_plane_modules") or {}
+    for module in CONTROL_PLANE_MODULES:
+        expected = expected_modules.get(module)
+        actual = live_modules.get(module)
+        entry = {"field": f"control_plane_module.{module}",
+                 "expected": expected, "actual": actual,
+                 "match": expected == actual and expected is not None}
+        report["checked"].append(entry)
+        if not entry["match"]:
+            raise EnvironmentMismatch(
+                f"Environment mismatch on control_plane_module.{module}: "
+                f"expected {expected!r}, got {actual!r}. Install the "
+                f"control-plane dependencies with "
+                f"scripts/install_colab_cli.sh, or regenerate the manifest "
+                f"deliberately in a PR if the pinned environment changed.")
+    # TASK-007.1: source commit. A manifest that records no commit
+    # (legacy, or generated in a git checkout) passes vacuously; a
+    # manifest that records one requires the live code to resolve to
+    # the same commit, and fails closed when the live code cannot be
+    # proven at all.
+    expected_commit = manifest.get("source_commit")
+    live_commit = resolve_source_commit()
+    entry = {"field": "source_commit", "expected": expected_commit,
+             "actual": live_commit,
+             "match": expected_commit is None
+             or (bool(live_commit) and expected_commit == live_commit)}
+    report["checked"].append(entry)
+    if not entry["match"]:
+        raise EnvironmentMismatch(
+            f"Environment mismatch on source_commit: manifest was "
+            f"generated from {expected_commit!r} but the live code is "
+            f"{live_commit!r}. Regenerate the manifest with the synced "
+            f"commit (scripts/generate_environment_manifest.py "
+            f"--source-commit <SHA>).")
     report["drive_transport"] = manifest.get("drive_transport")
     return report

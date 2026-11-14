@@ -35,8 +35,8 @@
     },
     {
       "path": "AGENTS.md",
-      "size_bytes": 4752,
-      "sha256": "fc3b6cb57327fb0fe77157b9f803a70534cdfe1e21e19a8668b06b6a083abf8d",
+      "size_bytes": 4784,
+      "sha256": "1327156caa2ae204427afcae38a4500fb13afa3c558461273c6037fa4dac7033",
       "role": "Supporting file"
     },
     {
@@ -47,8 +47,8 @@
     },
     {
       "path": "README.md",
-      "size_bytes": 7804,
-      "sha256": "89d049361a6f1b4e2d5c26ab79d5b5d5337dcf9ce669d25429b296ae233a2d2b",
+      "size_bytes": 7857,
+      "sha256": "18f6862e565c1b226e162aa9ea4926351615bac72846678577da665d7718394c",
       "role": "Supporting file"
     },
     {
@@ -419,8 +419,8 @@
     },
     {
       "path": "docs/module_inventory.md",
-      "size_bytes": 49485,
-      "sha256": "85e89526f907c91a543b80e178e50b93bef2b45e1aa82388f57fc57f3ae71d98",
+      "size_bytes": 51006,
+      "sha256": "30d7c00e9a97eeedcc14fbe9c5ada7eb4746a56bbc5ef5d82df46b637d2a6f21",
       "role": "Module inventory (this table's source of truth for hashes)"
     },
     {
@@ -461,8 +461,8 @@
     },
     {
       "path": "docs/runbooks/generic-task-spec.md",
-      "size_bytes": 5093,
-      "sha256": "bb8a0bfcfb3b40e7c8f500715d5325a56cb1808de019c045757396371857ed8d",
+      "size_bytes": 5632,
+      "sha256": "f23ad6b18dedc7041b5bf348889d245c02f911fc577ff94e10bdcf9e19c7faef",
       "role": "Documentation / evidence"
     },
     {
@@ -473,8 +473,8 @@
     },
     {
       "path": "docs/runbooks/preflight.md",
-      "size_bytes": 1951,
-      "sha256": "e1962666a201342b07cc29f02373ff0613a3ecf69efb1a3b6bd5525501127b7a",
+      "size_bytes": 2058,
+      "sha256": "094cbf3609fa4dbffe5c9f1fd396a00ab0b689b3d9a8bae10cef6dfbb315e529",
       "role": "Documentation / evidence"
     },
     {
@@ -485,8 +485,8 @@
     },
     {
       "path": "docs/runbooks/production-run.md",
-      "size_bytes": 2344,
-      "sha256": "46e955760bc9644bfc0d791ed0e2202aaceb7e7c015f5fad3db10b82b55ac77e",
+      "size_bytes": 2535,
+      "sha256": "2a195353fbe9baca4c298edf62395914358fec3aa9d180b513cc75fe287f9186",
       "role": "Documentation / evidence"
     },
     {
@@ -557,8 +557,8 @@
     },
     {
       "path": "environment_manifest.json",
-      "size_bytes": 1418,
-      "sha256": "446ceb5498b33e46fa723eb745b1d4baf389fca3082ec45176cbbb8d25e41275",
+      "size_bytes": 1591,
+      "sha256": "79ce5d8e7115608c94b0de846389009a780cbd716089c7301b60e46c00b88ed1",
       "role": "Supporting file"
     },
     {
@@ -593,14 +593,14 @@
     },
     {
       "path": "h3_controller.py",
-      "size_bytes": 170067,
-      "sha256": "0156caafa53ce40874cc0cdf7080380caba3e3211b763c776223caaaa38721cf",
+      "size_bytes": 170499,
+      "sha256": "7ff20be9ee20126bbf8d75d9bca9f254d255b57446c9ac5d8ff57a7b98412278",
       "role": "Run orchestration: preflight, allocation, mount, worker exec, download, stop"
     },
     {
       "path": "h3_drive_download.py",
-      "size_bytes": 41215,
-      "sha256": "4d1a06158c69947115c3e33f1c8693b7035d9081df748e058aebe1dd053cf58b",
+      "size_bytes": 42020,
+      "sha256": "1715337c5e9d6a674b3d3be036475a02e614c67b74baab6982b12ffccb8efcfd",
       "role": "Supporting file"
     },
     {
@@ -635,8 +635,8 @@
     },
     {
       "path": "h3_environment.py",
-      "size_bytes": 13488,
-      "sha256": "c7d5c1355687c7223574cf173c8cddde555c99c24690d3cf1594c8aa31b35e1b",
+      "size_bytes": 20183,
+      "sha256": "9cdd53a0f6295af3c0566bb452215649edd1d173e8595a6e9ac9f72e45edd7cd",
       "role": "Supporting file"
     },
     {
@@ -869,20 +869,20 @@
     },
     {
       "path": "scripts/generate_environment_manifest.py",
-      "size_bytes": 1673,
-      "sha256": "36a2820ecf90808ac4b183f72face865fd2df8c0128e0a12072317e45bec04fa",
+      "size_bytes": 1955,
+      "sha256": "d8ecd111b4fdd7b4e95f2f4a684437564fb85f3dab8fba202d9a1b73adc47a76",
       "role": "Operator wrapper / offline check"
     },
     {
       "path": "scripts/install_colab_cli.sh",
-      "size_bytes": 2934,
-      "sha256": "13535d7540bdcdfafffacc73cde4174864be77cca666a4eb20d8369c39c84b8c",
+      "size_bytes": 3667,
+      "sha256": "864d353001d7aaa612a921cb2cf40a6d7fa0a001b42cf623e264a8b41fea28ec",
       "role": "Operator wrapper / offline check"
     },
     {
       "path": "scripts/preflight.sh",
-      "size_bytes": 553,
-      "sha256": "1c6050513e4877c44232010359f73845299f886238f8c9a8dbbf0e56990f4aa0",
+      "size_bytes": 1304,
+      "sha256": "c6ad8bec7d244aa257b75284fb66b340f68bb4d64bf3e8edbaa5372562992d0c",
       "role": "Operator wrapper / offline check"
     },
     {
@@ -899,8 +899,14 @@
     },
     {
       "path": "scripts/run_h3_ab.sh",
-      "size_bytes": 3327,
-      "sha256": "970a511a8bbd7803c95ff525f58021da39cd7ba89043f03a87e8cdaa7772d352",
+      "size_bytes": 268,
+      "sha256": "780d643880c74785214768e4f7bfd11070b75902a4959aa79514d8bafcd01524",
+      "role": "Operator wrapper / offline check"
+    },
+    {
+      "path": "scripts/run_h3_task.sh",
+      "size_bytes": 5324,
+      "sha256": "88d0e5b5e280ec037232f216b51920a8d458b1be5c9ac1050ca7684c9515b2f7",
       "role": "Operator wrapper / offline check"
     },
     {
@@ -1001,8 +1007,8 @@
     },
     {
       "path": "tests/test_drive_download.py",
-      "size_bytes": 45370,
-      "sha256": "54709965d39cd12c616ce55299a3f2698351df2c737dfb7f2610a9799982c286",
+      "size_bytes": 47174,
+      "sha256": "2e1a2bb660807f3b5a0c0f748d437ea8dbc6f54ffb54778546905cc23c3368fe",
       "role": "Tests"
     },
     {
@@ -1031,8 +1037,8 @@
     },
     {
       "path": "tests/test_environment_contract.py",
-      "size_bytes": 10124,
-      "sha256": "23c42cc8aabfb605b54f1d0af896f84bbd0b4ffd4ac7997b2a13610087bc103f",
+      "size_bytes": 14889,
+      "sha256": "6eac3bf9b59e2da22b457ea438f32ca97e5498cb4c2c3cf67ba67bb5ae39ad80",
       "role": "Tests"
     },
     {
@@ -1090,6 +1096,12 @@
       "role": "Tests"
     },
     {
+      "path": "tests/test_run_h3_task_script.py",
+      "size_bytes": 4520,
+      "sha256": "e8d6cc56e0c4f6938fd8c271ed3d75a56d89ec2c4bdee3ce717dcc194e502a54",
+      "role": "Tests"
+    },
+    {
       "path": "tests/test_run_manifest.py",
       "size_bytes": 19343,
       "sha256": "db3de03bf5b4e052dd0562e51183a64bccdc4e250d61277441ea9291d478d456",
@@ -1111,6 +1123,12 @@
       "path": "tests/test_shutdown_executor.py",
       "size_bytes": 17058,
       "sha256": "562dca883920574c56608a1d071891e501e660bed5e81b3d98c45c314c2d09b5",
+      "role": "Tests"
+    },
+    {
+      "path": "tests/test_source_commit.py",
+      "size_bytes": 4266,
+      "sha256": "6b07f9451c5c93d0ce49de7c94afaf6356f9202209e744dff9922dfb135c87f3",
       "role": "Tests"
     },
     {
