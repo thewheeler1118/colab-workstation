@@ -11,7 +11,7 @@
   "height": 1312,
   "fps": 24,
   "animation_frames": 226,
-  "tail_card_frames": 48,
+  "tail_card_frames": 0,
   "steps": 25,
   "output_width": 1080,
   "output_height": 1920

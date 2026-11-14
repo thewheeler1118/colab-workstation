@@ -45,6 +45,29 @@ class ScriptGateTest(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("conflict", r.stderr)
 
+    def test_max_attempts_without_deliver_or_auto_recover_refuses(self):
+        r = self._run("--confirm-live", "--production-task-id", "t-1",
+                      "--task-spec", "config/task_spec.example.json",
+                      "--run-id", "h3-20261114T000000Z-abcdef",
+                      "--max-task-attempts", "2")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("needs --deliver or --auto-recover", r.stderr)
+
+    def test_max_attempts_out_of_range_refuses(self):
+        r = self._run("--confirm-live", "--production-task-id", "t-1",
+                      "--task-spec", "config/task_spec.example.json",
+                      "--run-id", "h3-20261114T000000Z-abcdef",
+                      "--deliver", "--max-task-attempts", "4")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("must be 1, 2 or 3", r.stderr)
+
+    def test_deliver_and_auto_recover_conflict_refuses(self):
+        r = self._run("--confirm-live", "--production-task-id", "t-1",
+                      "--task-spec", "config/task_spec.example.json",
+                      "--deliver", "--auto-recover")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("conflict", r.stderr)
+
 
 class ScriptResolutionTest(unittest.TestCase):
     def _layout(self, venvs):
@@ -101,6 +124,28 @@ class ScriptResolutionTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("COLAB_CLI_PATH=" + str(root / ".venv/bin/colab"),
                       r.stdout)
+
+    def test_deliver_forwards_without_run_id(self):
+        # Deliver derives its run ids; --run-id must NOT be required
+        # and --task-deadline-utc / --max-task-attempts pass through.
+        root = self._layout([".venv-colab-cli"])
+        r = self._run(root, "--confirm-live", "--production-task-id",
+                      "task-0071", "--task-spec",
+                      "config/task_spec.example.json", "--deliver",
+                      "--task-deadline-utc", "2026-11-20T00:00:00Z",
+                      "--max-task-attempts", "3")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("h3_controller.py deliver --execute", r.stdout)
+        self.assertIn("--task-deadline-utc 2026-11-20T00:00:00Z", r.stdout)
+        self.assertIn("--max-task-attempts 3", r.stdout)
+        self.assertNotIn("--run-id", r.stdout)
+
+    def test_auto_recover_run_forwards_flag(self):
+        root = self._layout([".venv-colab-cli"])
+        r = self._run(root, *self._full_args(), "--auto-recover")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("h3_controller.py run --execute", r.stdout)
+        self.assertIn("--auto-recover", r.stdout)
 
 
 class WrapperTest(unittest.TestCase):

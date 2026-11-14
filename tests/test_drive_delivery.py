@@ -164,7 +164,10 @@ class DeliverVariantTest(unittest.TestCase):
                                      archive_fn=self._archive_ok())
 
     def test_wrong_frames_refuses_without_uploading(self):
-        with self.assertRaisesRegex(RuntimeError, "failed final dimensions/frames"):
+        with self.assertRaisesRegex(
+                RuntimeError,
+                "Delivery refused: local video is 100 frames 1080x1920, "
+                "expected 274 frames 1080x1920"):
             deliver_variant_to_drive("A", RUN_ID, _video_info(self.sha, frames=100),
                                      archive_fn=self._archive_ok())
 
@@ -547,7 +550,15 @@ class ArchiveActionTest(unittest.TestCase):
         result = hc.test_or_run(args)
         validate.assert_called_once_with(self.mp4, expected_frames=274, expected_fps=24,
                                          expected_width=1080, expected_height=1920)
-        deliver.assert_called_once_with("A", RUN_ID, _video_info(self.sha))
+        # TASK-008: the archive action now threads the resolved spec
+        # (here the A fixture adapter, from the spec-less manifest)
+        # through to the idempotent delivery call.
+        deliver.assert_called_once()
+        self.assertEqual(deliver.call_args.args,
+                         ("A", RUN_ID, _video_info(self.sha)))
+        spec = deliver.call_args.kwargs["spec"]
+        self.assertEqual(spec.task_id, "h3-ab-20261111")
+        self.assertEqual(spec.total_frames, 274)
         allocate.assert_not_called()
         self.assertEqual(result["state"], "DELIVERY_COMPLETED")
 

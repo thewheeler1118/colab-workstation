@@ -42,15 +42,21 @@ def _ledger(root, task, spent=2.5, budget=30.0, deadline=None,
     path.write_text(json.dumps(doc))
 
 
-def _good_run(root, run_id, task=TASK, variant="A"):
-    """A run meeting all seven F conditions. Returns its completion ts."""
+def _good_run(root, run_id, task=TASK, variant="A", local_frames=274,
+              task_spec=None):
+    """A run meeting all seven F conditions. Returns its completion ts.
+    `local_frames` / `task_spec` let a spec-driven run (e.g. 226 frames,
+    tail 0) prove the spec total — not the frozen 274 — is the gate."""
     rm.create_run_manifest(root, task, run_id, variant=variant, budget={})
     rm.update_run(root, run_id, session_id="muse-h3-aaaa0001",
                   session_state="ACTIVE", task_state="GPU_ALLOCATED")
     rm.update_run(root, run_id, task_state="WORKER_STARTED")
     rm.update_run(root, run_id, task_state="MODELS_READY")
+    video_artifacts = {"local_sha256": SHA, "local_frames": local_frames}
+    if task_spec is not None:
+        video_artifacts["task_spec"] = task_spec
     rm.update_run(root, run_id, task_state="VIDEO_VALIDATED",
-                  artifacts={"local_sha256": SHA, "local_frames": 274})
+                  artifacts=video_artifacts)
     rm.update_run(root, run_id, task_state="GPU_STOP_CONFIRMED",
                   session_state="STOPPED")
     rm.update_run(root, run_id, task_state="DRIVE_VERIFIED",
@@ -140,7 +146,10 @@ class DeadlineBoundMetricTest(unittest.TestCase):
         f = report["metrics"]["deadline_bound_e2e_success_rate"]
         self.assertEqual((f["numerator"], f["denominator"]), (0, 1))
         self.assertEqual(f["verdicts"][0]["verdict"], "failure")
-        self.assertTrue(any("not terminal" in c
+        # TASK-008: past the deadline with nothing completed, the task
+        # fails on (a) — no run fully meets the F conditions — not on
+        # a blanket "not terminal" verdict.
+        self.assertTrue(any("no run fully meets" in c
                             for c in f["verdicts"][0]["failed_conditions"]))
 
     def test_no_deadline_task_excluded(self):
@@ -172,7 +181,12 @@ class DeadlineBoundMetricTest(unittest.TestCase):
         self.assertTrue(any("budget" in c
                             for c in f["verdicts"][0]["failed_conditions"]))
 
-    def test_failed_run_fails_the_task(self):
+    def test_failed_run_without_confirmed_stop_fails_the_task(self):
+        # TASK-008 (b): a failed run whose session was never confirmed
+        # STOPPED blocks the task — the failure is the unconfirmed
+        # shutdown (a possible orphan billable GPU), not the failure
+        # itself. A failed run WITH a confirmed stop does not block
+        # (see test_retry_success_with_confirmed_stop_counts).
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             completed = _good_run(root, "run-1")
@@ -189,7 +203,68 @@ class DeadlineBoundMetricTest(unittest.TestCase):
         f = report["metrics"]["deadline_bound_e2e_success_rate"]
         self.assertEqual((f["numerator"], f["denominator"]), (0, 1))
         conds = f["verdicts"][0]["failed_conditions"]
-        self.assertTrue(any("run-2" in c for c in conds))
+        self.assertTrue(any("run-2" in c and "shutdown" in c for c in conds))
+
+    def test_retry_success_with_confirmed_stop_counts(self):
+        # TASK-008 (a)+(b): the first run failed but its session is
+        # confirmed STOPPED (GPU_STOP_CONFIRMED stage + session_state
+        # STOPPED); the retry run fully succeeds before the deadline.
+        # The task counts as a success — Metric A (not F) is where the
+        # first-attempt failure is recorded.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            rm.create_run_manifest(root, TASK, "run-1", variant="A",
+                                   budget={})
+            rm.update_run(root, "run-1", session_id="muse-h3-aaaa0003",
+                          session_state="ACTIVE", task_state="GPU_ALLOCATED")
+            rm.update_run(root, "run-1", task_state="GPU_STOP_CONFIRMED",
+                          session_state="STOPPED")
+            rm.update_run(root, "run-1", task_state="FAILED",
+                          last_error="RuntimeError: boom")
+            completed = _good_run(root, "run-2")
+            deadline = _fmt(_parse(completed) + timedelta(hours=1))
+            now = _fmt(_parse(completed) + timedelta(hours=2))
+            _ledger(root, TASK, deadline=deadline)
+            report = rel.compute_reliability(root, now_utc=now)
+        f = report["metrics"]["deadline_bound_e2e_success_rate"]
+        self.assertEqual((f["numerator"], f["denominator"]), (1, 1))
+        self.assertEqual(f["verdicts"][0]["verdict"], "success")
+        self.assertEqual(f["verdicts"][0]["failed_conditions"], [])
+        self.assertEqual(f["verdicts"][0]["successful_run_ids"], ["run-2"])
+
+    def test_spec_frames_drive_f(self):
+        # TASK-008: a 226-frame no-tail run (task_spec recorded on the
+        # manifest) counts with local_frames == 226 — the spec total,
+        # not the frozen 274, is the F gate.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            spec = {"animation_frames": 226, "tail_card_frames": 0}
+            completed = _good_run(root, "run-1", local_frames=226,
+                                  task_spec=spec)
+            deadline = _fmt(_parse(completed) + timedelta(hours=1))
+            now = _fmt(_parse(completed) + timedelta(hours=2))
+            _ledger(root, TASK, deadline=deadline)
+            report = rel.compute_reliability(root, now_utc=now)
+        f = report["metrics"]["deadline_bound_e2e_success_rate"]
+        self.assertEqual((f["numerator"], f["denominator"]), (1, 1))
+        self.assertEqual(f["verdicts"][0]["verdict"], "success")
+
+    def test_spec_frames_mismatch_fails_f(self):
+        # The same 226-frame spec, but the run recorded 274 local
+        # frames: the spec gate fails the run, and the task fails (a).
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            spec = {"animation_frames": 226, "tail_card_frames": 0}
+            completed = _good_run(root, "run-1", local_frames=274,
+                                  task_spec=spec)
+            deadline = _fmt(_parse(completed) + timedelta(hours=1))
+            now = _fmt(_parse(completed) + timedelta(hours=2))
+            _ledger(root, TASK, deadline=deadline)
+            report = rel.compute_reliability(root, now_utc=now)
+        f = report["metrics"]["deadline_bound_e2e_success_rate"]
+        self.assertEqual((f["numerator"], f["denominator"]), (0, 1))
+        self.assertTrue(any("no run fully meets" in c
+                            for c in f["verdicts"][0]["failed_conditions"]))
 
     def test_manifest_claim_without_audit_evidence_fails(self):
         # A manifest claiming TASK_COMPLETED whose audit log lacks the

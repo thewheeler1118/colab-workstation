@@ -12,6 +12,13 @@
 #       --variant A --run-id h3-YYYYMMDDTHHMMSSZ-xxxxxx
 #   New task (no ledger yet): add --authorize-new-task. Without it the
 #   controller refuses to grant a fresh 30 CU budget (TASK-002 §5.2).
+# Task-level supervised delivery (TASK-008): --deliver (or run with
+#   --auto-recover) runs the deliver loop instead of a single attempt:
+#   it reuses a delivered run, recovers an archive-only run, resumes an
+#   in-flight run, and only behind the budget/session/deadline gates
+#   starts a controlled new attempt (default --max-task-attempts 2,
+#   max 3). --run-id is optional there (a fresh id is derived per
+#   attempt); --task-deadline-utc bounds new attempts.
 #
 # Interpreter resolution (TASK-007.1, fix 1): the script resolves the
 # production interpreter itself — prefer $REPO/.venv-colab-cli/bin/python
@@ -21,10 +28,11 @@
 # `exec python3 ...`, which called the system python3 (no google libs,
 # no COLAB_CLI_PATH) and crashed before doing anything.
 #
-# Forwards to: <resolved python> h3_controller.py run --execute
+# Forwards to: <resolved python> h3_controller.py (run | deliver) --execute
 #   --confirm-gpu --authorize-task-gpu --allow-g4 --allow-a100-highmem
 #   --fresh-inference
 #   --task-spec SPEC | --variant A|B --run-id ID --production-task-id ID [--authorize-new-task]
+#   [--task-deadline-utc UTC] [--auto-recover] [--max-task-attempts N]
 # The controller itself enforces: 30 CU task budget, 25 CU per-session cap,
 # G4_THEN_A100_HIGHMEM policy, pinned ComfyUI commit, and (TASK-006 P0-B)
 # the noninteractive Drive download preflight before allocation. The
@@ -36,6 +44,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO="$(pwd)"
 CONFIRM_LIVE=0; VARIANT=""; TASK_SPEC=""; RUN_ID=""; TASK_ID=""; AUTHORIZE_NEW_TASK=0
+DELIVER=0; AUTO_RECOVER=0; MAX_ATTEMPTS=""; TASK_DEADLINE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --confirm-live) CONFIRM_LIVE=1; shift ;;
@@ -44,18 +53,32 @@ while [ $# -gt 0 ]; do
     --run-id) RUN_ID="$2"; shift 2 ;;
     --production-task-id) TASK_ID="$2"; shift 2 ;;
     --authorize-new-task) AUTHORIZE_NEW_TASK=1; shift ;;
+    --deliver) DELIVER=1; shift ;;
+    --auto-recover) AUTO_RECOVER=1; shift ;;
+    --max-task-attempts) MAX_ATTEMPTS="$2"; shift 2 ;;
+    --task-deadline-utc) TASK_DEADLINE="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 if [ "$CONFIRM_LIVE" -ne 1 ]; then
   echo "REFUSED: run_h3_task.sh requires --confirm-live. This creates a paid GPU session." >&2
-  echo "Usage: $0 --confirm-live --production-task-id TASK (--task-spec SPEC | --variant A|B) --run-id h3-..." >&2
+  echo "Usage: $0 --confirm-live --production-task-id TASK (--task-spec SPEC | --variant A|B) --run-id h3-... [--deliver | --auto-recover] [--max-task-attempts N] [--task-deadline-utc UTC]" >&2
   exit 2
 fi
 if [ -n "$VARIANT" ] && [ -n "$TASK_SPEC" ]; then echo "REFUSED: --variant and --task-spec conflict; pass exactly one" >&2; exit 2; fi
 if [ -z "$VARIANT" ] && [ -z "$TASK_SPEC" ]; then echo "REFUSED: --task-spec <spec.json> or --variant A|B is required" >&2; exit 2; fi
 if [ -n "$VARIANT" ] && [ "$VARIANT" != "A" ] && [ "$VARIANT" != "B" ]; then echo "REFUSED: --variant must be A or B" >&2; exit 2; fi
-if [ -z "$RUN_ID" ]; then echo "REFUSED: --run-id is required" >&2; exit 2; fi
+if [ "$DELIVER" -eq 1 ] && [ "$AUTO_RECOVER" -eq 1 ]; then echo "REFUSED: --deliver and --auto-recover conflict; pass at most one" >&2; exit 2; fi
+if [ -n "$MAX_ATTEMPTS" ] && [ "$DELIVER" -ne 1 ] && [ "$AUTO_RECOVER" -ne 1 ]; then echo "REFUSED: --max-task-attempts needs --deliver or --auto-recover" >&2; exit 2; fi
+if [ -n "$MAX_ATTEMPTS" ]; then
+  case "$MAX_ATTEMPTS" in
+    1|2|3) ;;
+    *) echo "REFUSED: --max-task-attempts must be 1, 2 or 3" >&2; exit 2 ;;
+  esac
+fi
+# --run-id is required for a single run; the deliver loop derives a
+# fresh id per attempt when none is given.
+if [ "$DELIVER" -ne 1 ] && [ "$AUTO_RECOVER" -ne 1 ] && [ -z "$RUN_ID" ]; then echo "REFUSED: --run-id is required" >&2; exit 2; fi
 if [ -z "$TASK_ID" ]; then echo "REFUSED: --production-task-id is required (the historical default is never reused silently)" >&2; exit 2; fi
 # Resolve the production interpreter and its matching CLI. Gates above
 # run first, so the refusal messages work with no venv present.
@@ -97,4 +120,11 @@ fi
 EXTRA=()
 if [ "$AUTHORIZE_NEW_TASK" -eq 1 ]; then EXTRA+=(--authorize-new-task); fi
 if [ -n "$TASK_SPEC" ]; then EXTRA+=(--task-spec "$TASK_SPEC"); else EXTRA+=(--variant "$VARIANT"); fi
-exec "$PY" h3_controller.py run --execute --confirm-gpu --authorize-task-gpu --allow-g4 --allow-a100-highmem --fresh-inference --run-id "$RUN_ID" --production-task-id "$TASK_ID" "${EXTRA[@]}"
+if [ -n "$RUN_ID" ]; then EXTRA+=(--run-id "$RUN_ID"); fi
+if [ -n "$TASK_DEADLINE" ]; then EXTRA+=(--task-deadline-utc "$TASK_DEADLINE"); fi
+if [ -n "$MAX_ATTEMPTS" ]; then EXTRA+=(--max-task-attempts "$MAX_ATTEMPTS"); fi
+if [ "$DELIVER" -eq 1 ]; then
+  exec "$PY" h3_controller.py deliver --execute --confirm-gpu --authorize-task-gpu --allow-g4 --allow-a100-highmem --fresh-inference --production-task-id "$TASK_ID" "${EXTRA[@]}"
+fi
+if [ "$AUTO_RECOVER" -eq 1 ]; then EXTRA+=(--auto-recover); fi
+exec "$PY" h3_controller.py run --execute --confirm-gpu --authorize-task-gpu --allow-g4 --allow-a100-highmem --fresh-inference --production-task-id "$TASK_ID" "${EXTRA[@]}"

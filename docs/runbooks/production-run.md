@@ -40,6 +40,32 @@ an old authorisation.
 7. `./scripts/verify_shutdown.sh` — no active sessions; verify the CU
    balance moved only by the expected amount.
 
+## Supervised delivery (TASK-008, recommended entry point)
+
+For a task that must finish unattended, run the task-level loop
+instead of a single `run`:
+
+`./scripts/run_h3_task.sh --confirm-live --deliver --task-spec config/<task>.json --production-task-id <task_id> [--task-deadline-utc <UTC>] [--max-task-attempts 2]`
+
+or equivalently `run --auto-recover` with a `--run-id` for attempt 1
+(default `--max-task-attempts 2`, hard cap 3). The loop, inside the
+same TaskLock and 30 CU envelope, in order:
+
+1. Reuses a `TASK_COMPLETED` run (0 CU) after re-verifying its Drive
+   delivery evidence; if the evidence is gone it fails closed rather
+   than re-inferring or blindly re-uploading.
+2. Recovers a `COMPLETED_AWAITING_ARCHIVE` run by archiving only
+   (0 GPU / 0 CU).
+3. Resumes a non-terminal in-flight run (`_resume_run` takeover).
+4. Only then, and only if the previous run is `FAILED` with its GPU
+   session confirmed `STOPPED` by the three-state query, the remaining
+   budget covers a full minimal run + cleanup reserve, and time to the
+   deadline suffices, starts a controlled new attempt with a derived
+   run_id. An `ACTIVE` or `UNKNOWN` old session strictly blocks a
+   second GPU. Deterministic errors (illegal spec, SHA-256 mismatch,
+   403, ACCOUNT_MISMATCH, budget exhausted) fail closed immediately —
+   never retried.
+
 ## If the VM restarts mid-run
 
 See vm-restart-orphan-recovery.md FIRST: check/download the orphan session

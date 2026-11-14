@@ -431,6 +431,91 @@ def restore_comfyui_from_cache(cache_dir, comfy: Path, expected_sha256: str,
 def get_json(url,timeout=10):
     with urllib.request.urlopen(url,timeout=timeout) as r:return json.loads(r.read().decode())
 
+# Transient local ComfyUI API failures (TASK-008): a single slow
+# /history read, a dropped connection, or a 502/503/504 from the local
+# server is NOT proof the inference died. Only these are retried; any
+# other HTTP status or a malformed response is a real failure.
+HISTORY_TRANSIENT_MAX_CONSECUTIVE = 8
+HISTORY_POLL_TIMEOUT_SEC = 30
+
+
+def _is_transient_api_error(exc) -> bool:
+    """True for a transient local ComfyUI API failure: timeouts,
+    connection errors, HTTP 502/503/504 (raw, or as re-raised by
+    post_json as 'POST ... failed HTTP 502/503/504')."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in (502, 503, 504)
+    if isinstance(exc, RuntimeError):
+        text = str(exc)
+        return any(f"failed HTTP {code}" in text for code in (502, 503, 504))
+    return isinstance(exc, (TimeoutError, urllib.error.URLError, ConnectionError))
+
+
+def _find_prompt_by_client_id(server, client_id, timeout=10):
+    """Look for a prompt submitted under client_id in /queue (running +
+    pending) and /history. Returns the prompt_id, or None when the
+    submit never landed. A lookup failure returns None — the caller
+    treats 'not found' as 'not submitted', never as proof of failure."""
+    try:
+        queue = get_json(server + '/queue', timeout=timeout)
+    except Exception:
+        queue = {}
+    for key in ('queue_running', 'queue_pending'):
+        for item in (queue or {}).get(key) or []:
+            try:
+                if len(item) >= 4 and isinstance(item[3], dict) \
+                        and item[3].get('client_id') == client_id:
+                    return item[1]
+            except Exception:
+                continue
+    try:
+        history = get_json(server + '/history', timeout=timeout)
+    except Exception:
+        return None
+    for pid, event in (history or {}).items():
+        try:
+            prompt = (event or {}).get('prompt') or []
+            extra = prompt[3] if len(prompt) >= 4 else {}
+            if isinstance(extra, dict) and extra.get('client_id') == client_id:
+                return pid
+        except Exception:
+            continue
+    return None
+
+
+def _submit_prompt(server, api, client_id):
+    """Submit once with a fixed client_id; on a read timeout the request
+    may already be queued, so check /queue + /history for this client_id
+    before any resubmit. At most one checked resubmit; a second timeout
+    fails closed naming the client_id so the operator can see whether
+    the prompt landed. A deterministic rejection (node_errors / no
+    prompt_id) raises immediately — a rejected workflow never queues."""
+    payload = {'prompt': api, 'client_id': client_id}
+    for attempt in (1, 2):
+        try:
+            result = post_json(server + '/prompt', payload)
+        except Exception as e:  # noqa: BLE001 - transient vs fatal split below
+            if not _is_transient_api_error(e):
+                raise
+            found = _find_prompt_by_client_id(server, client_id)
+            if found:
+                print('H3_PROMPT_RECOVERED', found,
+                      'submit timed out but the prompt is already queued/running', flush=True)
+                return {'prompt_id': found}
+            if attempt == 2:
+                raise RuntimeError(
+                    f'ComfyUI /prompt submit timed out twice and no queued/running '
+                    f'prompt was found for client_id {client_id}; refusing a third '
+                    f'submit. Last error: {type(e).__name__}: {str(e)[:300]}') from e
+            print('H3_PROMPT_RESUBMIT',
+                  f'submit attempt {attempt} timed out and no queued prompt was found '
+                  f'for this client_id; one checked resubmit', flush=True)
+            continue
+        if result.get('node_errors') or not result.get('prompt_id'):
+            raise RuntimeError('ComfyUI rejected workflow: ' + json.dumps(result, ensure_ascii=False)[:1800])
+        return result
+    raise RuntimeError('unreachable: _submit_prompt loop exhausted')
+
 def post_json(url,data,timeout=30):
     req=urllib.request.Request(url,data=json.dumps(data).encode(),headers={'Content-Type':'application/json'})
     try:
@@ -675,14 +760,47 @@ def validate_api_against_object_info(api:dict,info:dict)->None:
         if not refs:
             raise RuntimeError('SaveVideo node has no connected sampler/video input')
 
-def execute_prompt(server,api:dict,timeout_sec:float):
-    result=post_json(server+'/prompt',{'prompt':api,'client_id':'muse-h3-'+uuid.uuid4().hex})
-    if result.get('node_errors') or not result.get('prompt_id'):
-        raise RuntimeError('ComfyUI rejected workflow: '+json.dumps(result,ensure_ascii=False)[:1800])
+def execute_prompt(server,api:dict,timeout_sec:float,proc=None):
+    """Submit api to ComfyUI and poll /history until the prompt succeeds.
+
+    TASK-008 debounce: the /history poll uses a 30 s single-request
+    timeout, and transient failures (timeouts, connection errors,
+    HTTP 502/503/504) are logged as H3_HISTORY_POLL_TRANSIENT and
+    retried with backoff — up to 8 consecutive — while ComfyUI is
+    still alive and the overall inference deadline has not passed. A
+    transient failure never kills a running GPU inference. Only a
+    dead ComfyUI process (proc.poll() is not None, when a proc handle
+    is supplied), a non-transient error, 9 consecutive transient
+    failures, or the overall deadline ends the poll. The submit itself
+    is idempotent: a fixed client_id is used for the whole call, and
+    a read timeout on /prompt is resolved by checking /queue +
+    /history before any resubmit (see _submit_prompt)."""
+    client_id='muse-h3-'+uuid.uuid4().hex
+    result=_submit_prompt(server,api,client_id)
     pid=result['prompt_id'];end=time.monotonic()+timeout_sec
     print('INFERENCE_SUBMITTED',pid,flush=True)
+    transient=0
     while time.monotonic()<end:
-        data=get_json(server+'/history/'+pid,timeout=10)
+        try:
+            data=get_json(server+'/history/'+pid,timeout=HISTORY_POLL_TIMEOUT_SEC)
+        except Exception as e:  # noqa: BLE001 - transient vs fatal split below
+            if not _is_transient_api_error(e):
+                raise
+            transient+=1
+            print('H3_HISTORY_POLL_TRANSIENT',transient,type(e).__name__,str(e)[:300],flush=True)
+            if proc is not None and proc.poll() is not None:
+                raise RuntimeError(
+                    f'ComfyUI process exited (returncode {proc.poll()}) during '
+                    f'/history poll after {transient} transient failures; '
+                    f'last poll error: {type(e).__name__}: {str(e)[:300]}')
+            if transient>HISTORY_TRANSIENT_MAX_CONSECUTIVE:
+                raise RuntimeError(
+                    f'/history poll failed {transient} consecutive times '
+                    f'(transient threshold {HISTORY_TRANSIENT_MAX_CONSECUTIVE}); '
+                    f'last error: {type(e).__name__}: {str(e)[:300]}')
+            time.sleep(min(5*transient,30))
+            continue
+        transient=0
         if pid in data:
             event=data[pid]
             if event.get('status',{}).get('status_str')=='error':
@@ -1063,7 +1181,7 @@ def main():
         try:write_job_state(ROOT,run_id,version,'MODELS_READY')
         except Exception:pass
         set_stage('inference_submit')
-        outputs=execute_prompt(server,api,timeout_sec=task['inference_timeout_sec'])
+        outputs=execute_prompt(server,api,timeout_sec=task['inference_timeout_sec'],proc=proc)
         set_stage('find_rendered_video')
         try:
             source = find_rendered_video(comfy, outputs, run_id, version, spec=spec)
