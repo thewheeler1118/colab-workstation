@@ -1,5 +1,5 @@
 {
-  "generated_utc": "2026-11-13",
+  "generated_utc": "2026-11-14",
   "source": "~/workspace/Muse_Colab_H3_Drive_v3/ (production baseline; verbatim copies SHA-256-verified at migration)",
   "note": "Every file in this repo except SOURCE_MANIFEST.json itself. Regenerate after any change; verify with scripts/verify_manifest.py. Excluded by policy and therefore absent: model weights, poster binary, MP4s, live ledgers/sessions/depot state, .venv, __pycache__.",
   "files": [
@@ -53,8 +53,8 @@
     },
     {
       "path": "assemble.py",
-      "size_bytes": 2927,
-      "sha256": "cca6a5feb2c49636373bc977343b21b52b669934df724d0de5d86aedf6ea30fe",
+      "size_bytes": 5499,
+      "sha256": "03e387e02a3de4908efb971749e1b73aee95188efebf8ff5f6547280cdbbb03c",
       "role": "Video assembly: 226 generated frames + 48 poster frames = 274 (ffmpeg)"
     },
     {
@@ -103,6 +103,12 @@
       "path": "config/pinned_hf_files.json",
       "size_bytes": 8592,
       "sha256": "b1b0c868ec9bcfbc295247724f23f88be26aa42e870f96a8a0fcd109ed1745d3",
+      "role": "Configuration (mirrors code constants; asserted by tests)"
+    },
+    {
+      "path": "config/task_spec.example.json",
+      "size_bytes": 1910,
+      "sha256": "fd173f0625c4694cab57e3cf6770297ce9c0b41f9ff720324a50b3c3d91df1bc",
       "role": "Configuration (mirrors code constants; asserted by tests)"
     },
     {
@@ -413,8 +419,8 @@
     },
     {
       "path": "docs/module_inventory.md",
-      "size_bytes": 48405,
-      "sha256": "2ee79e22f0f615d5fcd12c546ceb06877db3d3a4908bd383b600ece2f3c5c75c",
+      "size_bytes": 49485,
+      "sha256": "85e89526f907c91a543b80e178e50b93bef2b45e1aa82388f57fc57f3ae71d98",
       "role": "Module inventory (this table's source of truth for hashes)"
     },
     {
@@ -454,9 +460,15 @@
       "role": "Documentation / evidence"
     },
     {
+      "path": "docs/runbooks/generic-task-spec.md",
+      "size_bytes": 5093,
+      "sha256": "bb8a0bfcfb3b40e7c8f500715d5325a56cb1808de019c045757396371857ed8d",
+      "role": "Documentation / evidence"
+    },
+    {
       "path": "docs/runbooks/independent-shutdown-cron.md",
-      "size_bytes": 4821,
-      "sha256": "45c7f49b37c607a94daa6ea6ee2d092ce6dc519aa2a2b4589a82a520be5b0f6c",
+      "size_bytes": 5193,
+      "sha256": "050cb6758c018d6304ea3c1775040631a47a79a8681a81cad96e9ede59a597c0",
       "role": "Documentation / evidence"
     },
     {
@@ -473,8 +485,8 @@
     },
     {
       "path": "docs/runbooks/production-run.md",
-      "size_bytes": 1866,
-      "sha256": "4700d448b54a933c3b9467b99172819ce00fa07631c07e11fc3940c4e2625bef",
+      "size_bytes": 2344,
+      "sha256": "46e955760bc9644bfc0d791ed0e2202aaceb7e7c015f5fad3db10b82b55ac77e",
       "role": "Documentation / evidence"
     },
     {
@@ -575,20 +587,20 @@
     },
     {
       "path": "h3_contract.py",
-      "size_bytes": 9257,
-      "sha256": "61645a5558f41dfcb8e6757daa32cf74f4dabda10debf5c7d71239f147912855",
+      "size_bytes": 10998,
+      "sha256": "70a8b726f25f62d07b04eaa94e5af31a40a8f36176b9cd3e18d0f0f9fbde82f1",
       "role": "Video contract, A/B prompts, API workflow patch (pinned nodes)"
     },
     {
       "path": "h3_controller.py",
-      "size_bytes": 148614,
-      "sha256": "7261998bb7b66552f640de0b50027cadab2766c3f25642817eaf74f2a7c2cb40",
+      "size_bytes": 170067,
+      "sha256": "0156caafa53ce40874cc0cdf7080380caba3e3211b763c776223caaaa38721cf",
       "role": "Run orchestration: preflight, allocation, mount, worker exec, download, stop"
     },
     {
       "path": "h3_drive_download.py",
-      "size_bytes": 28567,
-      "sha256": "ee74523e3fd9e1c5c9f637e7fbf9ab98fe3765798899a2b3f71089d7621f70a1",
+      "size_bytes": 41215,
+      "sha256": "4d1a06158c69947115c3e33f1c8693b7035d9081df748e058aebe1dd053cf58b",
       "role": "Supporting file"
     },
     {
@@ -611,8 +623,8 @@
     },
     {
       "path": "h3_drive_transport.py",
-      "size_bytes": 5168,
-      "sha256": "52b00c9a7248a6743b7ad7cfbbbec4597732b481394625eb0802c8371ceb71df",
+      "size_bytes": 5987,
+      "sha256": "31729959d5df69c89487fadfc8825d83a527d76942a13d0a43ee21830c9922ce",
       "role": "Supporting file"
     },
     {
@@ -629,8 +641,8 @@
     },
     {
       "path": "h3_gpu_lease_registry.py",
-      "size_bytes": 25791,
-      "sha256": "7e6913dfe08940f55e7872aa376ad732b79cb17a1df8b9cdb4ef3ff914270376",
+      "size_bytes": 27925,
+      "sha256": "7a321caccd53d39eb2f259b76d53bf9c3b3769e1c90357dd5013963692999111",
       "role": "Supporting file"
     },
     {
@@ -677,8 +689,8 @@
     },
     {
       "path": "h3_output_check.py",
-      "size_bytes": 2661,
-      "sha256": "3b7fe975685248786e239efac15d692d47543b68e6666eb0f5d42a84e3e40922",
+      "size_bytes": 3196,
+      "sha256": "8cd9eb4fddf8bd26dda67963eb131d53801f27d9231182ebc04c6cbd6ddde9a4",
       "role": "Remote final-MP4 ffprobe check (OUTPUT_CHECK_JSON, 274f/24fps/1080x1920)"
     },
     {
@@ -689,8 +701,8 @@
     },
     {
       "path": "h3_remote_worker.py",
-      "size_bytes": 55398,
-      "sha256": "fdce764ea5e0cf32258f395ab5a926b5a1d7a7655630dd1b43fc4848b991ec21",
+      "size_bytes": 59666,
+      "sha256": "d32a1dd9c756f29166544624e1094b1f829231e7c27656de8ca5abe66f05613e",
       "role": "Remote ComfyUI worker: restore, inference, find_rendered_video, assemble"
     },
     {
@@ -713,8 +725,8 @@
     },
     {
       "path": "h3_shutdown_executor.py",
-      "size_bytes": 10868,
-      "sha256": "945d53f4d98a9fc01297a43a5e6b1459a3ce06a88e0a6548eb676a11ec61dab0",
+      "size_bytes": 16181,
+      "sha256": "548e46ed7ca5d1bc7725c0ae505379e1c98e2d757cf3dce83fa08c00dce65e56",
       "role": "Supporting file"
     },
     {
@@ -724,9 +736,15 @@
       "role": "Supporting file"
     },
     {
+      "path": "h3_task_spec.py",
+      "size_bytes": 17937,
+      "sha256": "922283f3666bbd8b0c218a475a60e828b68f1f0788d1dcee81d872b186f4d8c5",
+      "role": "Supporting file"
+    },
+    {
       "path": "h3_video_qa.py",
-      "size_bytes": 9476,
-      "sha256": "64c6666c538a3dce1e291e44f0ea671373dff8445b4296684756a2f520ca7fe7",
+      "size_bytes": 10613,
+      "sha256": "254c9fcf04f7c0a173fc0214a6fe4947038370d8d2193010741804d59b297cec",
       "role": "Local final-video validation + poster-tail PSNR QA"
     },
     {
@@ -881,8 +899,8 @@
     },
     {
       "path": "scripts/run_h3_ab.sh",
-      "size_bytes": 2621,
-      "sha256": "77dbb4697f082832fbb8e7a837494d0a621f471eb39e44b74b08687acb87ec50",
+      "size_bytes": 3327,
+      "sha256": "970a511a8bbd7803c95ff525f58021da39cd7ba89043f03a87e8cdaa7772d352",
       "role": "Operator wrapper / offline check"
     },
     {
@@ -971,8 +989,8 @@
     },
     {
       "path": "tests/test_drive_delivery.py",
-      "size_bytes": 27451,
-      "sha256": "48659db27d5c7df9ef9f58838f7e3b221202b771cd22306f18641f472e606bda",
+      "size_bytes": 28036,
+      "sha256": "e8103e3a291ccf0ec90f1c2c9bb677e3992b9026fab4070dc08f288b22be85aa",
       "role": "Tests"
     },
     {
@@ -983,8 +1001,8 @@
     },
     {
       "path": "tests/test_drive_download.py",
-      "size_bytes": 34905,
-      "sha256": "b8f9e9014495e68375e24bb6fa96ab0458bc7577ad5d06347cb80f903e51d8ef",
+      "size_bytes": 45370,
+      "sha256": "54709965d39cd12c616ce55299a3f2698351df2c737dfb7f2610a9799982c286",
       "role": "Tests"
     },
     {
@@ -995,8 +1013,8 @@
     },
     {
       "path": "tests/test_drive_transport.py",
-      "size_bytes": 11248,
-      "sha256": "7c5b9c4c3b009b626d6504d4eaca2e6998e367e0f7c8a6c8587ccd00a89d5c6b",
+      "size_bytes": 12044,
+      "sha256": "bb582ef04b2e5043cbe1364ddb3fd74d84a5515f4a9c9cc3f5c77e36193960cc",
       "role": "Tests"
     },
     {
@@ -1019,14 +1037,14 @@
     },
     {
       "path": "tests/test_fault_injection.py",
-      "size_bytes": 56435,
-      "sha256": "cbf4461447d4584b56548cf97d07638999067c13238fa3ad0928e119f66b8584",
+      "size_bytes": 56914,
+      "sha256": "829ec2f392833984bc8872db75e2608f0ba833ac4774ca2572356df518ab5c83",
       "role": "Tests"
     },
     {
       "path": "tests/test_gpu_lease_registry.py",
-      "size_bytes": 13842,
-      "sha256": "58892452fc8f00b073ebccb9875c1d03b3f1359a6f4dd1df5daa60fb476d84cc",
+      "size_bytes": 18238,
+      "sha256": "f0092548f408de8b9699c35ade0d0bae38a173a9355a8799b3348a0d2c930c0b",
       "role": "Tests"
     },
     {
@@ -1037,8 +1055,8 @@
     },
     {
       "path": "tests/test_h3_mount_repair.py",
-      "size_bytes": 24939,
-      "sha256": "7b318abe02da5d0558d6a769ea2bd91305e84b40f3a8180dc1833fed5558423a",
+      "size_bytes": 26723,
+      "sha256": "001c2322f56065061e9700e852ba55327baec86038ce4b66badcdb10b674c7c5",
       "role": "Tests: mount repair, CLI patches, budget/watchdog/restore gates (31 tests)"
     },
     {
@@ -1055,8 +1073,8 @@
     },
     {
       "path": "tests/test_recoverable_controller.py",
-      "size_bytes": 32911,
-      "sha256": "d68e380347b6cb042625e022744159ace4e148bf263a47801f15a521b7408dee",
+      "size_bytes": 32922,
+      "sha256": "f3309b1ac953b28c0a33e34b87a73137016466be61dffb9459dd3a51f17ed963",
       "role": "Tests"
     },
     {
@@ -1091,14 +1109,14 @@
     },
     {
       "path": "tests/test_shutdown_executor.py",
-      "size_bytes": 9767,
-      "sha256": "d9673512dd78b17e0089184c0a03fdeef58f1af65503b46b96b10213ea93dcfd",
+      "size_bytes": 17058,
+      "sha256": "562dca883920574c56608a1d071891e501e660bed5e81b3d98c45c314c2d09b5",
       "role": "Tests"
     },
     {
       "path": "tests/test_stop_state_hotfix.py",
-      "size_bytes": 32818,
-      "sha256": "b3214a21a16ccd8ac68531194b2a422d6cba1d42af1ad79d5b3f2a5651f149ab",
+      "size_bytes": 33281,
+      "sha256": "c233c07f3df50b89931408cfad1771397ded1109df1f489cce53926df4eeef9f",
       "role": "Tests"
     },
     {
@@ -1111,6 +1129,12 @@
       "path": "tests/test_task_lock.py",
       "size_bytes": 2148,
       "sha256": "ed7ee4d141ea8d8a68fdf2690fbdb0be942fd069add722b00a4398d2cc03db90",
+      "role": "Tests"
+    },
+    {
+      "path": "tests/test_task_spec.py",
+      "size_bytes": 29718,
+      "sha256": "5d133bdfe500a2c89b8a218f428d051bca6dc10f3a9238d3fc5ee0b1aa69e9c4",
       "role": "Tests"
     },
     {

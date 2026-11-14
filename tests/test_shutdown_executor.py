@@ -53,22 +53,25 @@ class ExecutorTestBase(unittest.TestCase):
                                  mirror=self.mirror)
 
     def _lease(self, sid, deadline=PAST, final=True, owner=OWNER, **kw):
-        lease = self.reg.register_lease(
-            session_id=sid, run_id="run-1",
-            production_task_id="h3-ab-20261111", gpu_model="G4",
-            stop_deadline_utc=deadline, budget_cap_cu=25.0, owner_id=owner,
-            started_at_utc="2026-11-13T06:00:00+00:00")
+        args = {"session_id": sid, "run_id": "run-1",
+                "production_task_id": "h3-ab-20261111", "gpu_model": "G4",
+                "stop_deadline_utc": deadline, "budget_cap_cu": 25.0,
+                "owner_id": owner,
+                "started_at_utc": "2026-11-13T06:00:00+00:00"}
+        args.update(kw)
+        lease = self.reg.register_lease(**args)
         if final:
             self.reg.update_deadline(sid, deadline, final=True)
         return lease
 
     def _run(self, confirm=True, stop_fn=None, owner_fn=None,
-             max_stops=3, **kw):
+             max_stops=3, production_task_id="h3-ab-20261111", **kw):
         return hx.run_executor(
             self.reg, confirm_stop=confirm, max_stops=max_stops,
             executor_id="exec-test", now=NOW,
             stop_fn=stop_fn or FakeStop(),
-            owner_id_fn=owner_fn or (lambda: OWNER), **kw)
+            owner_id_fn=owner_fn or (lambda: OWNER),
+            production_task_id=production_task_id, **kw)
 
 
 class AuditTests(ExecutorTestBase):
@@ -219,6 +222,130 @@ class StopTests(ExecutorTestBase):
         self.assertEqual(report["skipped"][0]["reason"], "retry_not_due")
 
 
+class TaskScopeTests(ExecutorTestBase):
+    """TASK-007: audit → claim → stop stay inside one production_task_id."""
+
+    def test_audit_filters_out_of_task_scope(self):
+        self._lease("muse-h3-in")
+        self._lease("muse-h3-out", production_task_id="h3-other-task")
+        report = self._run(confirm=False)
+        self.assertEqual(len(report["overdue"]), 1)
+        self.assertEqual(report["overdue"][0]["session_id"], "muse-h3-in")
+        reasons = {s["session_id"]: s["reason"] for s in report["skipped"]}
+        self.assertEqual(reasons["muse-h3-out"], "out_of_task_scope")
+
+    def test_stop_only_stops_in_task_leases(self):
+        stop = FakeStop()
+        self._lease("muse-h3-in")
+        self._lease("muse-h3-out", production_task_id="h3-other-task")
+        report = self._run(stop_fn=stop)
+        self.assertEqual(stop.calls, ["muse-h3-in"])
+        self.assertEqual(len(report["stopped"]), 1)
+        self.assertEqual(
+            self.reg.get_lease("muse-h3-out")["last_confirmed_state"],
+            "ACTIVE")
+
+    def test_audit_without_task_id_does_not_filter(self):
+        self._lease("muse-h3-in")
+        self._lease("muse-h3-out", production_task_id="h3-other-task")
+        report = self._run(confirm=False, production_task_id=None)
+        self.assertEqual(len(report["overdue"]), 2)
+
+    def test_stop_without_task_id_is_refused(self):
+        stop = FakeStop()
+        self._lease("muse-h3-aaa")
+        report = self._run(stop_fn=stop, production_task_id=None)
+        self.assertEqual(stop.calls, [])
+        self.assertEqual(report["exit_hint"], 2)
+        self.assertIn("production_task_id", report["error"])
+        self.assertEqual(
+            self.reg.get_lease("muse-h3-aaa")["last_confirmed_state"],
+            "ACTIVE")
+
+
+class EmergencyCapTests(ExecutorTestBase):
+    """TASK-007: an unfinalised lease is stoppable only past its
+    emergency cap, and only on a live-state verdict."""
+
+    def _unfinalised(self, sid, max_wall_sec=3600):
+        # started 06:00, stop deadline 07:00 (past at NOW 08:00),
+        # emergency = 06:00 + max_wall_sec + 900 s.
+        return self._lease(sid, deadline=PAST, final=False,
+                           max_wall_sec=max_wall_sec)
+
+    def test_emergency_active_enters_stop_flow(self):
+        self._unfinalised("muse-h3-aaa")
+        report = self._run(confirm=False,
+                           query_fn=lambda sid: "ACTIVE")
+        self.assertEqual(len(report["overdue"]), 1)
+        self.assertEqual(report["overdue"][0]["reason"],
+                         "emergency_unfinalized_deadline")
+        stop = FakeStop()
+        report = self._run(stop_fn=stop, query_fn=lambda sid: "ACTIVE")
+        self.assertEqual(stop.calls, ["muse-h3-aaa"])
+        self.assertEqual(len(report["stopped"]), 1)
+
+    def test_emergency_unknown_enters_stop_flow(self):
+        self._unfinalised("muse-h3-aaa")
+        report = self._run(confirm=False,
+                           query_fn=lambda sid: "UNKNOWN")
+        self.assertEqual(len(report["overdue"]), 1)
+        self.assertEqual(report["overdue"][0]["reason"],
+                         "emergency_unfinalized_deadline")
+
+    def test_emergency_state_enum_is_accepted(self):
+        from h3_session_watchdog import SessionState
+
+        self._unfinalised("muse-h3-aaa")
+        report = self._run(confirm=False,
+                           query_fn=lambda sid: SessionState.ACTIVE)
+        self.assertEqual(len(report["overdue"]), 1)
+
+    def test_emergency_stopped_archives_lease_without_stop_call(self):
+        self._unfinalised("muse-h3-aaa")
+        stop = FakeStop()
+        report = self._run(stop_fn=stop,
+                           query_fn=lambda sid: "STOPPED")
+        self.assertEqual(stop.calls, [])
+        self.assertEqual(len(report["overdue"]), 0)
+        reasons = {s["session_id"]: s["reason"] for s in report["skipped"]}
+        self.assertEqual(reasons["muse-h3-aaa"],
+                         "emergency_stopped_archived")
+        self.assertEqual(
+            self.reg.get_lease("muse-h3-aaa")["last_confirmed_state"],
+            "STOPPED")
+
+    def test_emergency_query_failure_skips_without_stop(self):
+        self._unfinalised("muse-h3-aaa")
+
+        def _boom(sid):
+            raise RuntimeError("cli down")
+
+        stop = FakeStop()
+        report = self._run(stop_fn=stop, query_fn=_boom)
+        self.assertEqual(stop.calls, [])
+        self.assertEqual(len(report["overdue"]), 0)
+        reasons = {s["session_id"]: s["reason"] for s in report["skipped"]}
+        self.assertEqual(reasons["muse-h3-aaa"], "emergency_query_failed")
+
+    def test_emergency_not_yet_reached_stays_not_final(self):
+        # emergency = 06:00 + 7200 s + 900 s = 08:15, NOW is 08:00.
+        self._unfinalised("muse-h3-aaa", max_wall_sec=7200)
+        report = self._run(confirm=False,
+                           query_fn=lambda sid: "ACTIVE")
+        self.assertEqual(len(report["overdue"]), 0)
+        reasons = {s["session_id"]: s["reason"] for s in report["skipped"]}
+        self.assertEqual(reasons["muse-h3-aaa"], "deadline_not_final")
+
+    def test_no_emergency_cap_keeps_old_never_stop_rule(self):
+        self._lease("muse-h3-aaa", deadline=PAST, final=False)
+        report = self._run(confirm=False,
+                           query_fn=lambda sid: "ACTIVE")
+        self.assertEqual(len(report["overdue"]), 0)
+        reasons = {s["session_id"]: s["reason"] for s in report["skipped"]}
+        self.assertEqual(reasons["muse-h3-aaa"], "deadline_not_final")
+
+
 class MainTests(unittest.TestCase):
     def test_main_audit_on_empty_registry_exits_zero(self):
         td = tempfile.mkdtemp()
@@ -235,6 +362,37 @@ class MainTests(unittest.TestCase):
         report = json.loads(printed)
         self.assertEqual(report["action"], "audit")
         self.assertEqual(report["leases_seen"], 0)
+
+
+    def test_main_stop_without_task_id_exits_two(self):
+        td = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(td, ignore_errors=True))
+        with patch("sys.argv", ["h3_shutdown_executor.py", "stop",
+                                "--confirm-stop",
+                                "--registry", str(Path(td) / "leases.json"),
+                                "--no-mirror"]), \
+                patch.object(hx, "REPORT_DIR", Path(td) / "reports"), \
+                patch("sys.stdout") as fake_out:
+            code = hx.main()
+        self.assertEqual(code, 2)
+        printed = "".join(c[0][0] for c in fake_out.write.call_args_list)
+        self.assertIn("production_task_id", printed)
+
+    def test_main_audit_with_task_id_reports_scope(self):
+        td = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(td, ignore_errors=True))
+        with patch("sys.argv", ["h3_shutdown_executor.py", "audit",
+                                "--production-task-id", "h3-ab-20261111",
+                                "--registry", str(Path(td) / "leases.json"),
+                                "--no-mirror"]), \
+                patch.object(hx, "current_owner_id", return_value=OWNER), \
+                patch.object(hx, "REPORT_DIR", Path(td) / "reports"), \
+                patch("sys.stdout") as fake_out:
+            code = hx.main()
+        self.assertEqual(code, 0)
+        printed = "".join(c[0][0] for c in fake_out.write.call_args_list)
+        report = json.loads(printed)
+        self.assertEqual(report["production_task_id"], "h3-ab-20261111")
 
 
 if __name__ == "__main__":

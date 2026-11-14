@@ -201,6 +201,13 @@ class ChainHarness:
         self._po(hc.time, "sleep", lambda s: None)
         self._po(hc, "validate_local")
         self._po(hc, "validate_comfy_workflow", return_value={})
+        # TASK-007: reference-image materialisation is stubbed here the
+        # same way validate_local is — the real function (local SHA-256
+        # check + Drive download) is covered by tests/test_task_spec.py,
+        # and the temp ROOT has no poster file.
+        self._po(hc, "_materialize_ref_images",
+                 return_value={"ref_image_1": Path("/tmp/ref_image_1.jpg"),
+                               "ref_image_2": Path("/tmp/ref_image_2.jpg")})
         self._po(hc, "verify_environment", side_effect=self._fake_env)
         self._po(hc, "verify_drive_download_preflight",
                  return_value={"preflight": "ok"})
@@ -378,7 +385,7 @@ class ChainHarness:
                     "MUSE_DRIVE_DOWNLOAD_PROBE_OK fid-1 10 10", "stderr": ""}
         return {"returncode": 0, "stdout": "", "stderr": ""}
 
-    def _fake_download(self, session, variant, run_id):
+    def _fake_download(self, session, variant, run_id, spec=None):
         self.download_calls.append((session, variant, run_id))
         if self.download_exc is not None:
             raise self.download_exc

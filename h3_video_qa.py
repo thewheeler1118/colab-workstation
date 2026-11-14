@@ -39,8 +39,17 @@ def ffprobe(path: Path) -> dict:
     return json.loads(p.stdout)
 
 
-def inspect_video(path: Path) -> dict:
-    """ffprobe frame count, resolution, fps, duration, streams, SHA-256."""
+def inspect_video(path: Path, expected_frames: int = EXPECTED_FRAMES,
+                  expected_fps: float = EXPECTED_FPS,
+                  expected_width: int = EXPECTED_WIDTH,
+                  expected_height: int = EXPECTED_HEIGHT) -> dict:
+    """ffprobe frame count, resolution, fps, duration, streams, SHA-256.
+
+    The expected values default to the frozen A/B delivery shape
+    (1080x1920, 24 fps, 274 frames); a generic TaskSpec passes its own
+    total frames / fps / output size instead. technical_pass is always
+    judged against the values the caller asked for.
+    """
     path = Path(path)
     if not path.is_file() or path.stat().st_size == 0:
         raise RuntimeError(f"Video missing or empty: {path}")
@@ -63,10 +72,10 @@ def inspect_video(path: Path) -> dict:
         "duration": frames / fps if fps else 0.0,
         "streams": [(s.get("codec_type"), s.get("codec_name")) for s in data.get("streams", [])],
         "technical_pass": (
-            int(video["width"]) == EXPECTED_WIDTH
-            and int(video["height"]) == EXPECTED_HEIGHT
-            and abs(fps - EXPECTED_FPS) < 0.01
-            and frames == EXPECTED_FRAMES
+            int(video["width"]) == expected_width
+            and int(video["height"]) == expected_height
+            and abs(fps - expected_fps) < 0.01
+            and frames == expected_frames
         ),
     }
     return result
@@ -91,23 +100,27 @@ def extract_qa_frames(mp4: Path, target_dir: Path) -> list[Path]:
     return out
 
 
-def compare_poster_tail(mp4: Path, original_poster: Path) -> dict:
-    """Check the last 48 frames are a static poster hold.
+def compare_poster_tail(mp4: Path, original_poster: Path,
+                        tail_frames: int = 48,
+                        total_frames: int = EXPECTED_FRAMES) -> dict:
+    """Check the last tail_frames frames are a static tail-card hold.
 
-    Uses ffmpeg PSNR between the decoded last frame and the original JPG.
+    Uses ffmpeg PSNR between the decoded last frame and the tail image.
     Lossy encoding means PSNR is finite, not infinite; a very low PSNR
     (or a failed decode) is a failure. Returns psnr and a pass flag.
+    Defaults are the frozen A/B shape (48-frame poster tail, 274 total).
     """
     mp4 = Path(mp4)
     original_poster = Path(original_poster)
-    info = inspect_video(mp4)
-    if info["frame_count"] != EXPECTED_FRAMES:
-        return {"tail_frames": 48, "psnr_db": None, "pass": False, "reason": "frame count is not 274"}
+    info = inspect_video(mp4, expected_frames=total_frames)
+    if info["frame_count"] != total_frames:
+        return {"tail_frames": tail_frames, "psnr_db": None, "pass": False,
+                "reason": f"frame count is not {total_frames}"}
     tmp = Path(str(mp4) + ".last_frame.png")
     try:
         subprocess.run(
             ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-             "-i", str(mp4), "-vf", f"select='eq(n\\,{EXPECTED_FRAMES - 1})'",
+             "-i", str(mp4), "-vf", f"select='eq(n\\,{total_frames - 1})'",
              "-frames:v", "1", str(tmp)],
             check=True, timeout=120,
         )
@@ -128,7 +141,7 @@ def compare_poster_tail(mp4: Path, original_poster: Path) -> dict:
                     pass
         # A poster hold after H.264 encoding typically scores well above
         # 30 dB; below that the tail is not recognisably the poster.
-        return {"tail_frames": 48, "psnr_db": psnr, "pass": psnr is not None and psnr >= 30.0}
+        return {"tail_frames": tail_frames, "psnr_db": psnr, "pass": psnr is not None and psnr >= 30.0}
     finally:
         if tmp.exists():
             tmp.unlink()
@@ -152,13 +165,18 @@ def build_contact_sheet(frames: list[Path], output: Path) -> Path:
     return output
 
 
-def validate_final_video(path: Path) -> dict:
-    info = inspect_video(path)
+def validate_final_video(path: Path, expected_frames: int = EXPECTED_FRAMES,
+                         expected_fps: float = EXPECTED_FPS,
+                         expected_width: int = EXPECTED_WIDTH,
+                         expected_height: int = EXPECTED_HEIGHT) -> dict:
+    info = inspect_video(path, expected_frames=expected_frames,
+                         expected_fps=expected_fps, expected_width=expected_width,
+                         expected_height=expected_height)
     if not info["technical_pass"]:
         raise RuntimeError(
             f"Final video technical QA failed: {info['width']}x{info['height']} "
             f"{info['fps']}fps {info['frame_count']} frames, expected "
-            f"{EXPECTED_WIDTH}x{EXPECTED_HEIGHT} {EXPECTED_FPS}fps {EXPECTED_FRAMES} frames"
+            f"{expected_width}x{expected_height} {expected_fps}fps {expected_frames} frames"
         )
     return info
 

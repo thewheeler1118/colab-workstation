@@ -1,0 +1,18 @@
+{
+  "task_id": "h3-ab-20261111",
+  "output_prefix": "A",
+  "ref_image_1": {
+    "sha256": "bd6d45312f340234d0fa06af0de5284949b2196f280677dd44468a300075c7bb",
+    "local_path": "assets/original_poster.jpg"
+  },
+  "prompt": "Use <Picture 1> as the exact VISUAL IDENTITY and Q-style reference for the leopard hero, red-and-gold bullfighter suit, blue goggles, red cape and arena. Use <Picture 2> only as a supplementary style/character reference; both images show the same original poster. Do NOT draw poster titles, logos, scoreboard text or event dates during the animated section. Vertical 9:16, bright chibi anime, stable character design, continuous coherent action, no speech or subtitles. Characters: Q版猎豹吉祥物，穿红金斗牛士服、戴滑雪镜式护目镜、手持大红斗篷，圆头圆脑、豹纹斑点、表情自信潇洒. Q版大公牛，深色毛皮、牛角锋利、低头刨地、鼻孔喷气、力量感强. Arena: 阳光明媚的西班牙斗牛场，圆形看台、拥挤观众、红旗、黄沙地面. Basketball: 标准橙色篮球、黑色纹路、Q版卡通材质. Audio only: hoofbeats, bull breathing, cape swishes, rushing air, arena cheer, no dialogue, no copyrighted music. FIRST (0-2s) calm leopard bullfighter stands alone in the arena. Bull snorts and scrapes sand; leopard smiles and flicks the red cape. SECOND (2-5s) bull CHARGES, leopard sidesteps once, cape billows, bull misses and runs past. THIRD (5-7.5s) bull CHARGES A SECOND TIME, leopard makes a second distinct elegant dodge and the bull misses again. FINAL (7.5-9.4s) leopard gathers cape, turns toward camera, bull leaves frame, leopard raises one orange basketball in triumph. Continuous action, no cuts to title card.",
+  "seed": 42,
+  "width": 736,
+  "height": 1312,
+  "fps": 24,
+  "animation_frames": 226,
+  "tail_card_frames": 48,
+  "steps": 25,
+  "output_width": 1080,
+  "output_height": 1920
+}

@@ -58,10 +58,16 @@ TOKEN_REFRESH_MARGIN_SEC = 600
 # Hard cap on renewals per run; the controller enforces the same cap.
 MAX_TOKEN_RENEWALS = 6
 
-DEFAULT_CHUNK_SIZE = 1024 * 1024  # 1 MiB streaming writes
+DEFAULT_CHUNK_SIZE = 8 * 1024 * 1024  # 8 MiB streaming writes (TASK-007)
 DEFAULT_MAX_ATTEMPTS = 4
 DEFAULT_BACKOFF_BASE_SEC = 2.0
 DEFAULT_TIMEOUT_SEC = 300
+# Files at or above this size get a sharded concurrent download when
+# starting fresh (TASK-007): a 40 GiB restore over one TCP stream is
+# the single biggest cold-start risk against a ~60-minute session
+# budget. Below it the single stream is simpler and fast enough.
+CONCURRENT_MIN_SIZE = 256 * 1024 * 1024
+DEFAULT_CONCURRENT_WORKERS = 4
 # A slow-but-alive download is not killed; the read timeout only bounds
 # a single stalled read inside urlopen.
 TRANSIENT_STATUSES = (429, 500, 502, 503, 504)
@@ -82,6 +88,18 @@ class DriveChangedError(DriveDownloadError):
 
 class DriveRetryExhaustedError(DriveDownloadError):
     """Transient failures outlived the bounded retry budget."""
+
+
+class _NoRangeSupport(Exception):
+    """Internal: a ranged request was answered 200, so the server does
+    not honour Range for this file. Signals the caller to fall back
+    to the single-stream path (never an error by itself)."""
+
+
+class _ProgressAborted(Exception):
+    """Internal: a shard stopped early because the progress callback
+    raised (e.g. the worker's budget projection). The recorded
+    callback error is what surfaces, never this marker."""
 
 
 class TokenUnavailable(RuntimeError):
@@ -241,22 +259,29 @@ class DriveDownloader:
     ``on_token_expiring`` is called as ``on_token_expiring(token_id,
     seconds_remaining)`` when the provider reports less than the
     renewal margin during a download.
+    ``concurrent_workers`` bounds the sharded download of large fresh
+    files (``>= CONCURRENT_MIN_SIZE``); it is separate from
+    ``max_workers``, which bounds multi-file ``download_all``.
     """
 
     def __init__(self, token_provider, chunk_size: int = DEFAULT_CHUNK_SIZE,
                  max_attempts: int = DEFAULT_MAX_ATTEMPTS,
                  backoff_base_sec: float = DEFAULT_BACKOFF_BASE_SEC,
                  max_workers: int = 1,
+                 concurrent_workers: int = DEFAULT_CONCURRENT_WORKERS,
                  timeout_sec: int = DEFAULT_TIMEOUT_SEC):
         if max_attempts < 1:
             raise ValueError("max_attempts must be >= 1")
         if max_workers < 1:
             raise ValueError("max_workers must be >= 1")
+        if concurrent_workers < 1:
+            raise ValueError("concurrent_workers must be >= 1")
         self.token_provider = token_provider
         self.chunk_size = chunk_size
         self.max_attempts = max_attempts
         self.backoff_base_sec = backoff_base_sec
         self.max_workers = max_workers
+        self.concurrent_workers = concurrent_workers
         self.timeout_sec = timeout_sec
 
     # -- HTTP plumbing (stdlib only; urlopen is module-level for tests) --
@@ -365,7 +390,21 @@ class DriveDownloader:
         last_error: Exception | None = None
         refreshed_once = False
         url = f"{DRIVE_API_BASE}/files/{file_id}?alt=media&supportsAllDrives=true"
+        # TASK-007: large fresh downloads go sharded first. A merged
+        # .part still passes through the standard final verification
+        # below (size + full SHA-256 + post-metadata + atomic replace);
+        # False means "fall back to the single stream".
+        if start == 0 and expected_size >= CONCURRENT_MIN_SIZE \
+                and self.concurrent_workers > 1:
+            if self._download_concurrent(
+                    file_id, expected_size, part, on_progress,
+                    on_token_expiring):
+                start = expected_size
         for attempt in range(1, self.max_attempts + 1):
+            if start >= expected_size:
+                # Concurrent path already merged the whole file into
+                # .part; skip straight to final verification.
+                break
             # Token-expiry signal: let the caller request a renewal
             # while the current token still has life left.
             if on_token_expiring is not None:
@@ -532,6 +571,222 @@ class DriveDownloader:
         raise DriveRetryExhaustedError(
             "Drive download failed checksum/size for " + str(file_id)
             + ": " + detail)
+
+    # -- sharded concurrent download (TASK-007) --
+
+    def _download_shard(self, url: str, file_id: str, start: int, end: int,
+                        expected_size: int, shard_path: Path, report,
+                        abort: threading.Event) -> None:
+        """Download one byte range ``[start, end]`` into ``shard_path``.
+
+        Each attempt rewrites the shard from scratch. Raises
+        ``_NoRangeSupport`` when the server answers 200 (Range
+        ignored), ``DriveAuthError`` on 403 (fail closed, never falls
+        back), ``DriveRetryExhaustedError`` when retries run out, and
+        ``_ProgressAborted`` when the shared abort flag is set (the
+        progress callback raised; the recorded callback error is what
+        surfaces). Token refresh stays inside the thread-safe provider.
+        """
+        length = end - start + 1
+        last_error: Exception | None = None
+        refreshed_once = False
+        for attempt in range(1, self.max_attempts + 1):
+            if abort.is_set():
+                raise _ProgressAborted()
+            try:
+                token = self.token_provider.get_token()
+                req = urllib.request.Request(
+                    url, headers={"Authorization": "Bearer " + token,
+                                  "Range": f"bytes={start}-{end}"},
+                    method="GET")
+                with urlopen(req, timeout=self.timeout_sec) as resp:
+                    status = getattr(resp, "status", 200)
+                    if status == 200:
+                        raise _NoRangeSupport(
+                            "server answered 200 to a Range request for "
+                            + str(file_id))
+                    if status == 401:
+                        if not refreshed_once:
+                            refreshed_once = True
+                            try:
+                                self.token_provider.refresh()
+                            except TokenUnavailable as e:
+                                raise DriveAuthError(
+                                    "Drive download 401 and no fresh "
+                                    f"token available for {file_id}") from e
+                            continue
+                        raise DriveAuthError(
+                            "Drive download 401 after token refresh for "
+                            + str(file_id))
+                    if status == 403:
+                        raise DriveAuthError(
+                            "Drive download 403 (revoked or insufficient "
+                            f"permission) for {file_id}")
+                    if status != 206:
+                        if status in TRANSIENT_STATUSES:
+                            last_error = DriveDownloadError(
+                                f"Drive download HTTP {status} for {file_id}")
+                            if attempt < self.max_attempts:
+                                _sleep(_backoff_delay(attempt, self.backoff_base_sec))
+                                continue
+                            raise DriveRetryExhaustedError(
+                                "Drive download retries exhausted for "
+                                f"{file_id}: {last_error}") from last_error
+                        raise DriveDownloadError(
+                            f"Drive download HTTP {status} for {file_id}")
+                    cr = resp.headers.get("Content-Range", "")
+                    m = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", cr or "")
+                    if not m or int(m.group(1)) != start \
+                            or int(m.group(2)) != end \
+                            or int(m.group(3)) != expected_size:
+                        raise DriveChangedError(
+                            "Unexpected Content-Range for " + str(file_id))
+                    written = 0
+                    with shard_path.open("wb") as f:
+                        while True:
+                            if abort.is_set():
+                                raise _ProgressAborted()
+                            chunk = resp.read(self.chunk_size)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            written += len(chunk)
+                            if written > length:
+                                raise DriveDownloadError(
+                                    "Drive shard overran its range for "
+                                    + str(file_id))
+                            report(len(chunk))
+                    if written == length:
+                        return
+                    last_error = DriveDownloadError(
+                        "Drive shard short read for " + str(file_id))
+            except (DriveAuthError, DriveChangedError, _NoRangeSupport,
+                    _ProgressAborted):
+                raise
+            except urllib.error.HTTPError as e:
+                if e.code == 401 and not refreshed_once:
+                    refreshed_once = True
+                    try:
+                        self.token_provider.refresh()
+                    except TokenUnavailable as exc:
+                        raise DriveAuthError(
+                            "Drive download 401 and no fresh token "
+                            f"available for {file_id}") from exc
+                    continue
+                if e.code == 401:
+                    raise DriveAuthError(
+                        "Drive download 401 after token refresh for "
+                        + str(file_id)) from e
+                if e.code == 403:
+                    raise DriveAuthError(
+                        "Drive download 403 (revoked or insufficient "
+                        f"permission) for {file_id}") from e
+                if e.code in TRANSIENT_STATUSES:
+                    last_error = DriveDownloadError(
+                        f"Drive download HTTP {e.code} for {file_id}")
+                    if attempt < self.max_attempts:
+                        _sleep(_backoff_delay(attempt, self.backoff_base_sec))
+                        continue
+                    raise DriveRetryExhaustedError(
+                        "Drive download retries exhausted for "
+                        f"{file_id}: {last_error}") from e
+                raise DriveDownloadError(
+                    f"Drive download HTTP {e.code} for {file_id}") from e
+            except Exception as e:  # transport errors are transient
+                last_error = e
+            if attempt < self.max_attempts:
+                _sleep(_backoff_delay(attempt, self.backoff_base_sec))
+        raise DriveRetryExhaustedError(
+            "Drive shard retries exhausted for " + str(file_id)
+            + ": " + (str(last_error)[:120] if last_error else "unknown"))
+
+    def _download_concurrent(self, file_id: str, expected_size: int,
+                             part: Path, on_progress,
+                             on_token_expiring) -> bool:
+        """Shard a fresh large download across ``concurrent_workers``
+        Range requests into independent temp files, then merge them in
+        order into ``part``.
+
+        Returns True when the merge is done (the caller then runs the
+        standard final verification). Returns False to fall back to
+        the single-stream path: the server ignored Range, or a shard
+        exhausted its retries. A 403 (DriveAuthError), a metadata
+        disagreement (DriveChangedError), or an ``on_progress``
+        exception is fatal: the callback error is re-raised after the
+        pool finishes, and no fallback is attempted. Shard files are
+        cleaned up on every exit path.
+        """
+        # Token-expiry signal once, before the pool starts.
+        if on_token_expiring is not None:
+            remaining = None
+            seconds_remaining = getattr(
+                self.token_provider, "seconds_remaining", None)
+            if callable(seconds_remaining):
+                remaining = seconds_remaining()
+            if remaining is not None and remaining < TOKEN_REFRESH_MARGIN_SEC:
+                token_id = getattr(self.token_provider, "token_id", None)
+                on_token_expiring(token_id, remaining)
+
+        url = f"{DRIVE_API_BASE}/files/{file_id}?alt=media&supportsAllDrives=true"
+        n = self.concurrent_workers
+        shard_size = (expected_size + n - 1) // n
+        ranges = []
+        for i in range(n):
+            start = i * shard_size
+            end = min((i + 1) * shard_size, expected_size) - 1
+            ranges.append((start, end))
+        shard_paths = [Path(str(part) + f".shard{i}") for i in range(n)]
+
+        done = [0]
+        progress_lock = threading.Lock()
+        progress_error: list = []
+        abort = threading.Event()
+
+        def _report(nbytes: int) -> None:
+            # Held across the callback so concurrent shards report a
+            # monotonic cumulative total.
+            with progress_lock:
+                done[0] += nbytes
+                total = done[0]
+                if on_progress is not None:
+                    try:
+                        on_progress(total, expected_size)
+                    except Exception as exc:  # recorded; raised after the pool
+                        if not progress_error:
+                            progress_error.append(exc)
+                        abort.set()
+
+        errors: list = []
+        try:
+            with ThreadPoolExecutor(max_workers=n) as pool:
+                futs = [pool.submit(
+                    self._download_shard, url, file_id, s, e, expected_size,
+                    shard_paths[i], _report, abort)
+                    for i, (s, e) in enumerate(ranges)]
+                for fut in futs:
+                    try:
+                        fut.result()
+                    except Exception as exc:  # collected; classified below
+                        errors.append(exc)
+            if progress_error:
+                raise progress_error[0]
+            for exc in errors:
+                if isinstance(exc, (DriveAuthError, DriveChangedError)):
+                    raise exc
+            if errors:
+                return False  # no Range support, or a shard gave up
+            with part.open("wb") as out:
+                for shard_path in shard_paths:
+                    with shard_path.open("rb") as f:
+                        while True:
+                            chunk = f.read(self.chunk_size)
+                            if not chunk:
+                                break
+                            out.write(chunk)
+            return True
+        finally:
+            for shard_path in shard_paths:
+                shard_path.unlink(missing_ok=True)
 
     def probe_transport(self, file_id: str, probe_bytes: int = 1024 * 1024) -> dict:
         """Cheap auth + transport probe: metadata GET, then a single

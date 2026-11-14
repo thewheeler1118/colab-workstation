@@ -231,6 +231,13 @@ class RunVariantDeliveryTest(unittest.TestCase):
         self._po(hc.time, "sleep", lambda s: None)
         self._po(hc, "validate_local")
         self._po(hc, "validate_comfy_workflow", return_value={})
+        # TASK-007: reference-image materialisation is stubbed here the
+        # same way validate_local is — the real function (local SHA-256
+        # check + Drive download) is covered by tests/test_task_spec.py,
+        # and the temp ROOT has no poster file.
+        self._po(hc, "_materialize_ref_images",
+                 return_value={"ref_image_1": Path("/tmp/ref_image_1.jpg"),
+                               "ref_image_2": Path("/tmp/ref_image_2.jpg")})
         # TASK-005 §6: the environment gate runs before allocation; the
         # mock lets the delivery wiring tests proceed (a dedicated test
         # below proves the gate blocks allocation when it fails).
@@ -292,7 +299,7 @@ class RunVariantDeliveryTest(unittest.TestCase):
             return_value={"session_id": SESSION,
                           "production_task_id": "h3-ab-20261111"})
         self._po(hc, "ledger_path_for_task",
-                 return_value=str(Path(self.tmp.name) / "ledger.json"))
+                 return_value=Path(self.tmp.name) / "ledger.json")
         self._po(hwd, "record_session",
                  return_value={"started_at_utc": "2026-11-12T00:00:00+00:00",
                                "session_id": SESSION})
@@ -538,7 +545,8 @@ class ArchiveActionTest(unittest.TestCase):
         args = SimpleNamespace(action="archive", variant="A", run_id=RUN_ID,
                                production_task_id="h3-ab-20261111")
         result = hc.test_or_run(args)
-        validate.assert_called_once_with(self.mp4)
+        validate.assert_called_once_with(self.mp4, expected_frames=274, expected_fps=24,
+                                         expected_width=1080, expected_height=1920)
         deliver.assert_called_once_with("A", RUN_ID, _video_info(self.sha))
         allocate.assert_not_called()
         self.assertEqual(result["state"], "DELIVERY_COMPLETED")
