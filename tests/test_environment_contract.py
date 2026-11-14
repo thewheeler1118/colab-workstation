@@ -144,6 +144,9 @@ class GenerateTest(unittest.TestCase):
                                              source_commit="feedface" * 5)
         self.assertEqual(m["source_commit"], "feedface" * 5)
 
+    @unittest.skipUnless((ROOT / ".git").exists(),
+                          "not a git checkout (production has no .git; "
+                          "the RELEASE_COMMIT fallback is covered below)")
     def test_resolve_source_commit_git_repo(self):
         # The repo checkout itself: the live HEAD, nothing invented.
         import subprocess as sp
