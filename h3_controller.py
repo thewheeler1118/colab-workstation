@@ -595,22 +595,33 @@ def check_worker_done_marker(exec_result: dict, variant: str) -> dict:
         f"the output file was never produced. Worker output tail:\n{tail}")
 
 
-def check_remote_output(exec_result: dict, variant: str) -> dict:
+def check_remote_output(exec_result: dict, variant: str, spec=None) -> dict:
     """Fail-closed gate on the remote MP4 BEFORE any download: the remote
     output-check script must report OUTPUT_CHECK_JSON with ok=true, the
-    file existing, and ffprobe reading exactly 274 frames at 24 fps and
-    1080x1920. The worker's MUSE_H3_DONE_JSON marker alone is a claim;
+    file existing, and ffprobe reading the spec's total frames at the
+    spec fps and output size (fps within a 0.5 tolerance for container
+    rounding). The worker's MUSE_H3_DONE_JSON marker alone is a claim;
     this is the independent remote evidence the file is real and
-    decodable. Raises with the check output tail otherwise."""
+    decodable. Raises with the check output tail otherwise. Only the
+    spec-less legacy path falls back to the frozen A/B shape
+    (274 / 24 / 1080x1920)."""
+    expected_frames = spec.total_frames if spec is not None else 274
+    expected_fps = spec.fps if spec is not None else 24
+    expected_width = spec.output_width if spec is not None else 1080
+    expected_height = spec.output_height if spec is not None else 1920
     text = (exec_result or {}).get("stdout", "") or ""
     for line in text.splitlines():
         if line.startswith("OUTPUT_CHECK_JSON:"):
             info = json.loads(line.split("OUTPUT_CHECK_JSON:", 1)[1].strip())
-            if info.get("ok") and info.get("exists") and info.get("frames") == 274 \
-                    and info.get("fps") == 24 and info.get("width") == 1080 and info.get("height") == 1920:
+            fps = info.get("fps")
+            fps_ok = isinstance(fps, (int, float)) and abs(fps - expected_fps) <= 0.5
+            if info.get("ok") and info.get("exists") and info.get("frames") == expected_frames \
+                    and fps_ok and info.get("width") == expected_width and info.get("height") == expected_height:
                 return info
             raise RuntimeError(
-                f"Remote output check failed for variant {variant}: {json.dumps(info, ensure_ascii=False)[:800]}")
+                f"Remote output check failed for variant {variant}: expected "
+                f"{expected_frames} frames at {expected_fps}fps "
+                f"{expected_width}x{expected_height}, got {json.dumps(info, ensure_ascii=False)[:800]}")
     tail = (text + "\n" + ((exec_result or {}).get("stderr", "") or ""))[-1500:]
     raise RuntimeError(
         f"Remote output check for variant {variant} produced no OUTPUT_CHECK_JSON; "
@@ -1103,20 +1114,42 @@ def archive_variant_to_drive(variant: str, run_id: str, qa_files: list | None = 
     return {"output_folder_id": run_folder, "files": uploaded}
 
 
-def _validate_delivery_inputs(variant: str, run_id: str, video_info: dict) -> Path:
+def _validate_delivery_inputs(variant: str, run_id: str, video_info: dict, spec=None) -> Path:
     """Fail-closed pre-check shared by deliver_variant_to_drive and the
     idempotent wrapper: the local file must exist and be exactly the
-    validated 274-frame final video video_info describes."""
+    validated final video video_info describes, with the spec's total
+    frames, output size and fps (fps within a 0.5 tolerance). When no
+    spec is passed, the run's durable manifest is consulted for its
+    recorded TaskSpec; only a manifest with no usable spec falls back
+    to the frozen A/B delivery shape (274 / 24 / 1080x1920)."""
     from h3_contract import sha256_file
 
+    if spec is None:
+        try:
+            from h3_run_manifest import load_run_manifest
+
+            spec = _spec_from_manifest(load_run_manifest(ROOT, run_id) or {})
+        except Exception:
+            spec = None
+    expected_frames = spec.total_frames if spec is not None else 274
+    expected_fps = spec.fps if spec is not None else 24
+    expected_width = spec.output_width if spec is not None else 1080
+    expected_height = spec.output_height if spec is not None else 1920
     local_path = OUTPUT_ROOT / run_id / f"{variant}.mp4"
     if not local_path.is_file():
         raise RuntimeError(f"Delivery refused: local MP4 missing: {local_path}")
     for key in ("frame_count", "width", "height", "fps", "sha256"):
         if key not in video_info:
             raise RuntimeError(f"Delivery refused: video_info lacks {key}")
-    if (video_info["frame_count"], video_info["width"], video_info["height"]) != (274, 1080, 1920):
-        raise RuntimeError("Delivery refused: local video failed final dimensions/frames")
+    if (video_info["frame_count"], video_info["width"], video_info["height"]) != (expected_frames, expected_width, expected_height):
+        raise RuntimeError(
+            f"Delivery refused: local video is {video_info['frame_count']} frames "
+            f"{video_info['width']}x{video_info['height']}, expected {expected_frames} frames "
+            f"{expected_width}x{expected_height}")
+    fps = video_info.get("fps")
+    if not isinstance(fps, (int, float)) or abs(fps - expected_fps) > 0.5:
+        raise RuntimeError(
+            f"Delivery refused: local video fps={fps!r}, expected {expected_fps}")
     if sha256_file(local_path) != video_info["sha256"]:
         raise RuntimeError(f"Delivery refused: local MP4 SHA-256 does not match validated video_info: {local_path}")
     return local_path
@@ -1157,7 +1190,7 @@ def _existing_delivery_evidence(variant: str, run_id: str, video_info: dict,
 
 
 def deliver_variant_to_drive_idempotent(variant: str, run_id: str, video_info: dict,
-                                        archive_fn=None, max_attempts: int = 3) -> dict:
+                                        archive_fn=None, max_attempts: int = 3, spec=None) -> dict:
     """Idempotent delivery (TASK-005 §5, Issue #28). Before uploading, a
     manifest-recorded drive_file_id is server-verified (size + MD5
     against the local file via drive_api.verify_uploaded_file) and reused
@@ -1174,7 +1207,7 @@ def deliver_variant_to_drive_idempotent(variant: str, run_id: str, video_info: d
     from drive_api import verify_uploaded_file
     from drive_depot import drive_service
 
-    local_path = _validate_delivery_inputs(variant, run_id, video_info)
+    local_path = _validate_delivery_inputs(variant, run_id, video_info, spec)
     recorded_id = _recorded_delivery(run_id)
     if recorded_id:
         service = drive_service()
@@ -1196,11 +1229,11 @@ def deliver_variant_to_drive_idempotent(variant: str, run_id: str, video_info: d
             variant, run_id, video_info, recorded_id,
             manifest_artifacts.get("drive_output_folder_id"), "recorded_id")
     return deliver_variant_to_drive(variant, run_id, video_info,
-                                    archive_fn=archive_fn, max_attempts=max_attempts)
+                                    archive_fn=archive_fn, max_attempts=max_attempts, spec=spec)
 
 
 def deliver_variant_to_drive(variant: str, run_id: str, video_info: dict,
-                             archive_fn=None, max_attempts: int = 3) -> dict:
+                             archive_fn=None, max_attempts: int = 3, spec=None) -> dict:
     """Archive a locally validated MP4 to Drive AFTER the GPU is stopped.
 
     Call this only after download_and_validate_variant() has already run
@@ -1223,7 +1256,7 @@ def deliver_variant_to_drive(variant: str, run_id: str, video_info: dict,
     is an archive-only retry — never a re-run of the inference.
     """
     archive_fn = archive_fn or archive_variant_to_drive
-    local_path = _validate_delivery_inputs(variant, run_id, video_info)
+    local_path = _validate_delivery_inputs(variant, run_id, video_info, spec)
     _manifest_update(run_id, artifacts={"delivery_state": "DURABLE_UPLOAD_STARTED"})
     last_error = None
     for attempt in range(1, max_attempts + 1):
@@ -1744,18 +1777,21 @@ def poll_worker(session: str) -> dict:
     raise WorkerPollError(f"probe printed no job state marker; probe output tail:\n{tail}")
 
 
-def check_job_done_info(done_info, variant: str) -> dict:
+def check_job_done_info(done_info, variant: str, spec=None) -> dict:
     """Fail-closed validation of a VIDEO_READY output record, mirroring
     check_worker_done_marker's contract for the detached path: the record
-    must name a 274-frame final MP4 with a SHA-256. The remote ffprobe
-    check and the local validation after download are still the real
-    gates; this only proves the worker claims a complete output."""
+    must name a final MP4 with the spec's total frames and a SHA-256
+    (only the spec-less legacy path expects the frozen 274-frame shape).
+    The remote ffprobe check and the local validation after download are
+    still the real gates; this only proves the worker claims a complete
+    output."""
     if not isinstance(done_info, dict):
         raise RuntimeError(
             f"Worker VIDEO_READY record is not an object for variant {variant}: {done_info!r}"[:300])
-    if done_info.get("frames") != 274:
+    expected_frames = spec.total_frames if spec is not None else 274
+    if done_info.get("frames") != expected_frames:
         raise RuntimeError(
-            f"Worker VIDEO_READY record has frames={done_info.get('frames')!r}, expected 274")
+            f"Worker VIDEO_READY record has frames={done_info.get('frames')!r}, expected {expected_frames}")
     if not done_info.get("file") or not done_info.get("sha256"):
         raise RuntimeError(
             f"Worker VIDEO_READY record is missing file/sha256: {done_info!r}"[:300])
@@ -1855,7 +1891,7 @@ def _archive_local_mp4(variant: str, run_id: str, spec=None) -> dict:
         expected_fps=spec.fps if spec is not None else 24,
         expected_width=spec.output_width if spec is not None else 1080,
         expected_height=spec.output_height if spec is not None else 1920)
-    return deliver_variant_to_drive_idempotent(variant, run_id, info)
+    return deliver_variant_to_drive_idempotent(variant, run_id, info, spec=spec)
 
 
 def _resume_archive_only(args, manifest: dict) -> dict:
@@ -1977,14 +2013,14 @@ def _resume_finish(args, manifest: dict, worker_state: dict) -> dict:
     variant = manifest["variant"]
     session_id = manifest["session_id"]
     spec = _spec_from_manifest(manifest)
-    done_info = check_job_done_info(worker_state.get("output"), variant)
+    done_info = check_job_done_info(worker_state.get("output"), variant, spec)
     output_check = exec_script(session_id, ROOT / "h3_output_check.py", timeout=180,
                                env={"H3_VARIANT": variant,
                                     "H3_EXPECTED_FRAMES": str(spec.total_frames) if spec is not None else "274",
                                     "H3_EXPECTED_FPS": str(spec.fps) if spec is not None else "24",
                                     "H3_OUTPUT_WIDTH": str(spec.output_width) if spec is not None else "1080",
                                     "H3_OUTPUT_HEIGHT": str(spec.output_height) if spec is not None else "1920"})
-    check_remote_output(output_check, variant)
+    check_remote_output(output_check, variant, spec)
     record({"event": "resume_remote_output_checked", "variant": variant,
             "session": session_id, "done": done_info})
     from h3_video_qa import validate_final_video
@@ -2036,7 +2072,7 @@ def _resume_finish(args, manifest: dict, worker_state: dict) -> dict:
         raise RuntimeError("Stop not verified; run FAILED regardless of generated files")
     _manifest_update(run_id, task_state="GPU_STOP_CONFIRMED", session_state="STOPPED")
     try:
-        delivery = deliver_variant_to_drive_idempotent(variant, run_id, info)
+        delivery = deliver_variant_to_drive_idempotent(variant, run_id, info, spec=spec)
     except Exception as e:  # noqa: BLE001 - video is durable locally
         _manifest_update(run_id, task_state="COMPLETED_AWAITING_ARCHIVE",
                          last_error=str(e)[:500])
@@ -2061,7 +2097,7 @@ def _with_task_lock(fn):
     @functools.wraps(fn)
     def wrapper(args, *a, **kw):
         task_id = getattr(args, "production_task_id", "") or ""
-        if not task_id and fn.__name__ in ("_resume_run", "_stop_run"):
+        if not task_id and fn.__name__ in ("_resume_run", "_resume_run_inner", "_stop_run"):
             try:
                 from h3_run_manifest import load_run_manifest
 
@@ -2153,7 +2189,7 @@ def _resume_bootstrap(args, manifest: dict) -> dict:
             poll_interval_sec=getattr(args, "poll_interval_sec", 60),
             on_state=_make_worker_state_handler(
                 run_id, session_id, run_dir, boot["renewal_state"]))
-        done_info = check_job_done_info(worker_state.get("output"), variant)
+        done_info = check_job_done_info(worker_state.get("output"), variant, spec)
     except Exception:
         # Pull the server log before the session stops: it holds the
         # /prompt rejection detail the worker output may lack.
@@ -2164,6 +2200,12 @@ def _resume_bootstrap(args, manifest: dict) -> dict:
 
 @_with_task_lock
 def _resume_run(args) -> dict:
+    """Locked entry point; the body is _resume_run_inner so the deliver
+    loop (which already holds the task lock) can call it directly."""
+    return _resume_run_inner(args)
+
+
+def _resume_run_inner(args) -> dict:
     """Reconcile a run from its durable manifest and resume it if it is
     safe to do so. The checklist (TASK-005 §4.3), in order:
     terminal states, code version, task ledger, real session state,
@@ -2589,6 +2631,428 @@ def _run_bootstrap(args, session: str, run_dir: Path, budget_sec: int,
 
 @_with_task_lock
 def run_variant(args) -> dict:
+    """Locked entry point; the body is _run_variant_inner so the deliver
+    loop (which already holds the task lock) can call it directly."""
+    return _run_variant_inner(args)
+
+
+# ---------------------------------------------------------------------------
+# TASK-008: task-level automatic recovery loop (`deliver` action and
+# `run --auto-recover`).
+#
+# A single `run` is one GPU attempt. `deliver` supervises a whole
+# production task inside one TaskLock, one 30 CU task budget and an
+# optional task_deadline_utc: it reuses an already-delivered run (0 CU),
+# recovers an archive-only run (0 GPU / 0 CU), resumes an in-flight
+# run, and — only behind the gates below — starts a controlled new
+# attempt with a derived run_id. It never re-infers a completed video,
+# never opens a second GPU while the previous session may be alive,
+# and never retries a deterministic error. Every outcome is a result
+# dict (like `resume`); a refusal is a verdict, not a crash.
+# ---------------------------------------------------------------------------
+
+DEFAULT_MAX_TASK_ATTEMPTS = 2
+MAX_TASK_ATTEMPTS_LIMIT = 3
+# Minimum viable wall time for a fresh attempt (40 min): model restore
+# plus ~22 min inference plus download/stop margin. The actual wall is
+# whatever allowed_runtime_seconds() grants from the live rate and the
+# remaining budget; a grant below this floor refuses the attempt.
+MIN_ATTEMPT_WALL_SEC = 2400
+DEADLINE_MARGIN_SEC = 300
+SESSION_STOP_WAIT_ATTEMPTS = 3
+SESSION_STOP_WAIT_INTERVAL_SEC = 10
+
+# Substrings that mark an error as deterministic — retrying it would
+# only burn CU: account/permission problems, reference/model SHA-256
+# mismatches, a missing reference image, a bad model depot, an
+# exhausted budget, or a task that was never authorised. ValueError is
+# deterministic by construction (bad input/config, never transient).
+DETERMINISTIC_ERROR_MARKERS = (
+    "ACCOUNT_MISMATCH",
+    "Colab account != Drive account",
+    "NEW_TASK_REQUIRES_AUTHORIZATION",
+    "invalid_scope",
+    "HTTP 403",
+    "Forbidden",
+    "INSUFFICIENT_CU",
+    "Not enough paid time",
+    "SHA-256 mismatch",
+    "SHA256 mismatch",
+    "SHA-256 does not match",
+    "Reference image missing",
+    "Wrong depot folder",
+    "Four model files required",
+    "No server-verified READY document",
+    "Missing/invalid verified manifest",
+    "READY document size mismatch",
+)
+
+# Resume-refusal reasons that mean the previous session may still be
+# alive: opening a second GPU under any of them is forbidden.
+_RESUME_LIVE_SESSION_MARKERS = (
+    "UNKNOWN",
+    "unobservable",
+    "left running",
+    "belongs to another run",
+)
+
+
+def _is_deterministic_error(exc: BaseException) -> bool:
+    """True when retrying this error cannot help (see
+    DETERMINISTIC_ERROR_MARKERS)."""
+    if isinstance(exc, ValueError):
+        return True
+    text = str(exc)
+    return any(marker in text for marker in DETERMINISTIC_ERROR_MARKERS)
+
+
+def _resume_refusal_blocks_new_attempt(reason: str) -> bool:
+    """True when a resume refusal means the previous session may still
+    be alive (see _RESUME_LIVE_SESSION_MARKERS)."""
+    return any(marker in (reason or "") for marker in _RESUME_LIVE_SESSION_MARKERS)
+
+
+def _task_runs(root: Path, production_task_id: str) -> list[dict]:
+    """Durable manifests for one production task, oldest first."""
+    from h3_run_manifest import list_runs
+
+    return [m for m in list_runs(root)
+            if m.get("production_task_id") == production_task_id]
+
+
+def _attempts_used(task_id: str) -> int:
+    """GPU attempts already spent on this task: runs that allocated a
+    session. A run that failed before allocation spends no attempt."""
+    return sum(1 for m in _task_runs(ROOT, task_id) if m.get("session_id"))
+
+
+def _read_task_ledger(task_id: str) -> dict | None:
+    """The task's budget ledger, or None when no ledger exists yet."""
+    path = ledger_path_for_task(ROOT, task_id)
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _provisional_ledger(live_balance_cu: float) -> dict:
+    """Ledger-shaped dict for a task with no ledger file yet: the
+    creation-time baseline is the live balance right now, exactly as
+    load_or_create_budget_ledger would record it. Used only for the
+    deliver budget gate; never written to disk."""
+    return {
+        "project_budget_cu": PROJECT_BUDGET_CU,
+        "max_observed_spent_cu": 0.0,
+        "hard_stop_balance_cu": round(float(live_balance_cu) - PROJECT_BUDGET_CU, 2),
+        "prior_task_unbilled_reserve_cu": PRIOR_TASK_UNBILLED_RESERVE_CU,
+    }
+
+
+def _verify_completed_delivery(manifest: dict) -> tuple[str, dict | str | None]:
+    """Re-prove a TASK_COMPLETED run's recorded delivery (0 CU).
+    Returns ("verified", evidence), ("lost", reason), or
+    ("unverifiable", reason). The Drive file must still exist and not
+    be trashed; when the local MP4 is still present it must verify
+    against the recorded file (size + MD5)."""
+    artifacts = manifest.get("artifacts") or {}
+    drive_file_id = artifacts.get("drive_file_id")
+    run_id = manifest.get("run_id") or ""
+    if not drive_file_id:
+        return "lost", f"run {run_id} is TASK_COMPLETED but records no drive_file_id"
+    try:
+        from drive_depot import drive_service, get_file_evidence
+
+        service = drive_service()
+        meta = get_file_evidence(service, drive_file_id)
+    except Exception as e:  # noqa: BLE001 - classified below
+        text = str(e)
+        if "404" in text or "notFound" in text:
+            return "lost", f"Drive file {drive_file_id} for run {run_id} is gone ({text[:200]})"
+        return "unverifiable", f"Drive evidence lookup failed for run {run_id}: {type(e).__name__}: {text[:200]}"
+    if not meta or meta.get("trashed"):
+        return "lost", f"Drive file {drive_file_id} for run {run_id} is missing or trashed"
+    local_path = OUTPUT_ROOT / run_id / f"{manifest.get('variant') or ''}.mp4"
+    if local_path.is_file():
+        try:
+            from drive_api import verify_uploaded_file
+
+            verify_uploaded_file(service, drive_file_id, local_path)
+        except Exception as e:  # noqa: BLE001 - a mismatch is definitive
+            return "lost", (f"recorded Drive file {drive_file_id} does not verify "
+                           f"against the local MP4 for run {run_id}: {e}")
+    return "verified", {
+        "variant": manifest.get("variant"), "run_id": run_id,
+        "local_video_validated": True,
+        "drive_file_id": drive_file_id,
+        "drive_upload_verified": True,
+        "frames": artifacts.get("local_frames"),
+        "sha256": artifacts.get("local_sha256"),
+        "drive_output_folder_id": artifacts.get("drive_output_folder_id"),
+        "state": "DELIVERY_COMPLETED",
+        "reused_existing": True,
+        "reused_via": "task_completed_manifest",
+    }
+
+
+def _wait_for_session_stopped(session_id: str,
+                              attempts: int = SESSION_STOP_WAIT_ATTEMPTS,
+                              interval_sec: float = SESSION_STOP_WAIT_INTERVAL_SEC):
+    """Bounded re-check for a previous attempt's session: returns the
+    last observed SessionState (STOPPED / ACTIVE / UNKNOWN). UNKNOWN is
+    never treated as STOPPED."""
+    from h3_session_watchdog import SessionState, query_session_state
+
+    last = SessionState.UNKNOWN
+    for i in range(attempts):
+        last = query_session_state(session_id, colab_auth=_COLAB_AUTH)
+        if last == SessionState.STOPPED:
+            return last
+        if i < attempts - 1:
+            time.sleep(interval_sec)
+    return last
+
+
+def _fresh_run_id() -> str:
+    """A derived run_id in the established timestamped format."""
+    import secrets
+
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"h3-{stamp}-{secrets.token_hex(3)}"
+
+
+def _deliver_resume_args(task_id: str, run_id: str) -> argparse.Namespace:
+    """A minimal resume invocation for one run. Built fresh every time:
+    _resume_bootstrap stashes the manifest's spec on args._task_spec,
+    which must never leak into the deliver args' own spec cache."""
+    return argparse.Namespace(
+        run_id=run_id, production_task_id=task_id,
+        max_wall_sec=MAX_SESSION_SECONDS, poll_interval_sec=60,
+        variant=None, task_spec=None)
+
+
+def _deliver_attempt_args(args, run_id: str) -> argparse.Namespace:
+    """A run_variant invocation for one controlled attempt: a copy of
+    the deliver args with the derived run_id. The copy keeps the
+    resolved TaskSpec cache and the live-run confirmation flags."""
+    run_args = argparse.Namespace(**vars(args))
+    run_args.action = "run"
+    run_args.run_id = run_id
+    return run_args
+
+
+def _deliver_result(delivered: bool, outcome: str, task_id: str, run_id: str | None,
+                    delivery: dict | None, attempts_used: int, max_attempts: int,
+                    steps: list, reason: str = "") -> dict:
+    return {
+        "delivered": delivered,
+        "production_task_id": task_id,
+        "outcome": outcome,
+        "reason": reason,
+        "run_id": run_id,
+        "delivery": delivery,
+        "attempts_used": attempts_used,
+        "max_task_attempts": max_attempts,
+        "steps": steps,
+    }
+
+
+def _resume_one(task_id: str, run_id: str):
+    """One resume attempt; returns (result_dict_or_None, error_or_None).
+    The caller re-reads the manifest to decide what actually happened —
+    the return shape alone does not say whether the run progressed."""
+    try:
+        return _resume_run_inner(_deliver_resume_args(task_id, run_id)), None
+    except Exception as e:  # noqa: BLE001 - the manifest decides what happened
+        return None, e
+
+
+@_with_task_lock
+def deliver_task(args) -> dict:
+    """Task-level supervised delivery (TASK-008). See the section header
+    above. Never allocates a second GPU while the previous session may
+    be alive; never re-infers a completed video; never retries a
+    deterministic error. Returns a result dict; refusals are verdicts."""
+    from h3_run_manifest import TERMINAL_STATES, load_run_manifest
+    from h3_session_watchdog import SessionState
+
+    task_id = getattr(args, "production_task_id", "") or ""
+    if not task_id:
+        raise RuntimeError("--production-task-id is required for deliver")
+    try:
+        max_attempts = int(getattr(args, "max_task_attempts", DEFAULT_MAX_TASK_ATTEMPTS))
+    except (TypeError, ValueError):
+        raise RuntimeError("--max-task-attempts must be an integer") from None
+    if not 1 <= max_attempts <= MAX_TASK_ATTEMPTS_LIMIT:
+        raise RuntimeError(
+            f"--max-task-attempts must be 1..{MAX_TASK_ATTEMPTS_LIMIT}, got {max_attempts}")
+    deadline = parse_task_deadline(getattr(args, "task_deadline_utc", "") or "")
+    steps: list[dict] = []
+    guard = 0
+    while True:
+        guard += 1
+        if guard > max_attempts + 10:
+            return _deliver_result(False, "loop_guard", task_id, None, None,
+                                   _attempts_used(task_id), max_attempts, steps,
+                                   "deliver loop exceeded its iteration guard; refusing to continue")
+        runs = _task_runs(ROOT, task_id)
+        # 1. Reuse an already-delivered run (0 CU).
+        completed = [m for m in runs if m.get("task_state") == "TASK_COMPLETED"]
+        for manifest in sorted(completed, key=lambda m: m.get("created_at_utc", ""), reverse=True):
+            status, payload = _verify_completed_delivery(manifest)
+            if status == "verified":
+                steps.append({"step": "reused_completed", "run_id": manifest.get("run_id")})
+                return _deliver_result(True, "reused_completed", task_id, manifest.get("run_id"),
+                                       payload, _attempts_used(task_id), max_attempts, steps)
+            if status == "lost":
+                return _deliver_result(False, "delivery_evidence_lost", task_id,
+                                       manifest.get("run_id"), None,
+                                       _attempts_used(task_id), max_attempts, steps, str(payload))
+            steps.append({"step": "delivery_unverifiable", "run_id": manifest.get("run_id"),
+                          "detail": str(payload)})
+            return _deliver_result(False, "delivery_unverifiable", task_id,
+                                   manifest.get("run_id"), None,
+                                   _attempts_used(task_id), max_attempts, steps, str(payload))
+        # 2. Archive-only recovery for COMPLETED_AWAITING_ARCHIVE (0 GPU / 0 CU).
+        awaiting = [m for m in runs if m.get("task_state") == "COMPLETED_AWAITING_ARCHIVE"]
+        if awaiting:
+            manifest = sorted(awaiting, key=lambda m: m.get("created_at_utc", ""), reverse=True)[0]
+            run_id = manifest.get("run_id") or ""
+            result, error = _resume_one(task_id, run_id)
+            steps.append({"step": "archive_recovery", "run_id": run_id,
+                          "detail": str(error or result)[:300]})
+            after = (load_run_manifest(ROOT, run_id) or {}).get("task_state")
+            if after == "TASK_COMPLETED":
+                continue  # re-read: step 1 picks the recovered run up
+            return _deliver_result(False, "archive_failed", task_id, run_id, None,
+                                   _attempts_used(task_id), max_attempts, steps,
+                                   f"archive-only recovery did not complete run {run_id} "
+                                   f"(state {after}): {str(error or result)[:300]}")
+        # 3. Resume a non-terminal in-flight run.
+        inflight = [m for m in runs if m.get("task_state") not in TERMINAL_STATES]
+        if inflight:
+            manifest = sorted(inflight, key=lambda m: m.get("created_at_utc", ""))[0]
+            run_id = manifest.get("run_id") or ""
+            before = manifest.get("task_state")
+            result, error = _resume_one(task_id, run_id)
+            steps.append({"step": "resume_inflight", "run_id": run_id,
+                          "detail": str(error or result)[:300]})
+            after = (load_run_manifest(ROOT, run_id) or {}).get("task_state")
+            if after == "TASK_COMPLETED" or after in TERMINAL_STATES or after != before:
+                continue  # progressed (completed / failed / archived): re-read
+            if error is not None:
+                # A resume that raised leaves the session state unknown:
+                # never open a second GPU on top of it.
+                return _deliver_result(False, "blocked_live_session", task_id, run_id, None,
+                                       _attempts_used(task_id), max_attempts, steps,
+                                       f"resume raised {type(error).__name__}: {str(error)[:300]}; "
+                                       f"session state unknown, refusing a second GPU")
+            reason = (result or {}).get("reason") or ""
+            if _resume_refusal_blocks_new_attempt(reason):
+                return _deliver_result(False, "blocked_live_session", task_id, run_id, None,
+                                       _attempts_used(task_id), max_attempts, steps,
+                                       f"in-flight run {run_id} may still hold a live session; "
+                                       f"refusing a second GPU ({reason[:300]})")
+            return _deliver_result(False, "resume_refused", task_id, run_id, None,
+                                   _attempts_used(task_id), max_attempts, steps,
+                                   f"in-flight run {run_id} refused resume without progressing "
+                                   f"({reason[:300]})")
+        # 4. Controlled new attempt behind the gates.
+        attempts_used = _attempts_used(task_id)
+        if attempts_used >= max_attempts:
+            return _deliver_result(False, "attempts_exhausted", task_id,
+                                   runs[-1].get("run_id") if runs else None, None,
+                                   attempts_used, max_attempts, steps,
+                                   f"task already used {attempts_used}/{max_attempts} GPU attempts")
+        latest = runs[-1] if runs else None
+        if latest is not None and latest.get("task_state") != "FAILED":
+            return _deliver_result(False, "blocked_unexpected_state", task_id,
+                                   latest.get("run_id"), None, attempts_used, max_attempts, steps,
+                                   f"latest run {latest.get('run_id')} is {latest.get('task_state')}, "
+                                   f"not FAILED; refusing a new attempt")
+        if latest is not None and latest.get("session_id"):
+            state = _wait_for_session_stopped(latest["session_id"])
+            if state != SessionState.STOPPED:
+                return _deliver_result(False, "blocked_live_session", task_id,
+                                       latest.get("run_id"), None, attempts_used, max_attempts, steps,
+                                       f"previous run's session {latest['session_id']} is {state.name}; "
+                                       f"refusing a second GPU")
+            steps.append({"step": "previous_session_stopped", "run_id": latest.get("run_id")})
+        try:
+            live = inspect()
+        except Exception as e:  # noqa: BLE001 - live data is the gate input
+            return _deliver_result(False, "live_unreadable", task_id,
+                                   latest.get("run_id") if latest else None, None,
+                                   attempts_used, max_attempts, steps,
+                                   f"live usage/sessions unreadable; cannot bound a new attempt: {e}")
+        if live.get("rate") is None or float(live.get("rate") or 0) <= 0 \
+                or live.get("cu_balance") is None:
+            return _deliver_result(False, "live_unreadable", task_id,
+                                   latest.get("run_id") if latest else None, None,
+                                   attempts_used, max_attempts, steps,
+                                   "live CU rate/balance unreadable; cannot bound a new attempt")
+        ledger = _read_task_ledger(task_id)
+        if ledger is None:
+            ledger = _provisional_ledger(live["cu_balance"])
+        try:
+            wall = allowed_runtime_seconds(live["rate"], live["cu_balance"], ledger)
+        except Exception as e:  # noqa: BLE001 - BLOCKED / insufficient CU
+            return _deliver_result(False, "budget_insufficient", task_id,
+                                   latest.get("run_id") if latest else None, None,
+                                   attempts_used, max_attempts, steps, str(e)[:300])
+        if wall < MIN_ATTEMPT_WALL_SEC:
+            return _deliver_result(False, "budget_insufficient", task_id,
+                                   latest.get("run_id") if latest else None, None,
+                                   attempts_used, max_attempts, steps,
+                                   f"remaining budget grants only {wall}s of wall time; "
+                                   f"a minimal attempt needs {MIN_ATTEMPT_WALL_SEC}s")
+        effective_deadline = deadline or (ledger.get("deadline_utc") if isinstance(ledger, dict) else None)
+        if effective_deadline:
+            deadline_dt = datetime.datetime.strptime(
+                effective_deadline, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+            now_dt = datetime.datetime.now(datetime.timezone.utc)
+            if (deadline_dt - now_dt).total_seconds() < MIN_ATTEMPT_WALL_SEC + DEADLINE_MARGIN_SEC:
+                return _deliver_result(False, "deadline_passed", task_id,
+                                       latest.get("run_id") if latest else None, None,
+                                       attempts_used, max_attempts, steps,
+                                       f"less than {MIN_ATTEMPT_WALL_SEC + DEADLINE_MARGIN_SEC}s remain "
+                                       f"before the task deadline {effective_deadline}")
+        # Spec for the new attempt (resolved here, not upfront: reuse /
+        # archive / resume paths need no spec at all).
+        try:
+            spec = resolve_run_spec(args)
+        except Exception as e:  # noqa: BLE001 - a bad spec is deterministic
+            return _deliver_result(False, "deterministic_error", task_id,
+                                   latest.get("run_id") if latest else None, None,
+                                   attempts_used, max_attempts, steps,
+                                   f"cannot resolve a TaskSpec for a new attempt: {e}")
+        run_id = getattr(args, "run_id", "") or ""
+        if run_id:
+            from h3_run_manifest import manifest_exists
+
+            if manifest_exists(ROOT, run_id):
+                return _deliver_result(False, "deterministic_error", task_id, run_id, None,
+                                       attempts_used, max_attempts, steps,
+                                       f"--run-id {run_id} already exists; refusing a duplicate run")
+        else:
+            run_id = _fresh_run_id()
+        steps.append({"step": "new_attempt", "run_id": run_id,
+                      "detail": f"attempt {attempts_used + 1}/{max_attempts}, wall {wall}s"})
+        try:
+            result = _run_variant_inner(_deliver_attempt_args(args, run_id))
+        except Exception as e:  # noqa: BLE001 - deterministic vs transient split
+            if _is_deterministic_error(e):
+                return _deliver_result(False, "deterministic_error", task_id, run_id, None,
+                                       attempts_used + 1, max_attempts, steps,
+                                       f"deterministic failure, refusing to retry: {e}")
+            steps.append({"step": "attempt_failed_transient", "run_id": run_id,
+                          "detail": f"{type(e).__name__}: {str(e)[:300]}"})
+            continue
+        steps.append({"step": "new_attempt_succeeded", "run_id": run_id})
+        return _deliver_result(True, "new_attempt_succeeded", task_id, run_id,
+                               (result or {}).get("delivery"), attempts_used + 1,
+                               max_attempts, steps)
+
+
+def _run_variant_inner(args) -> dict:
     global _EXEC_LOG_DIR, LEDGER_PATH, PRODUCTION_TASK_ID
     # TASK-007: one run is one TaskSpec. --task-spec loads it; --variant
     # A|B maps through the fixture adapter. The naming token for every
@@ -2921,7 +3385,7 @@ def run_variant(args) -> dict:
                     poll_interval_sec=getattr(args, "poll_interval_sec", 60),
                     on_state=_make_worker_state_handler(
                         args.run_id, session, run_dir, renewal_state))
-                done_info = check_job_done_info(worker_state.get("output"), variant)
+                done_info = check_job_done_info(worker_state.get("output"), variant, spec)
             except Exception:
                 # Pull the server log before the session stops: it holds
                 # the /prompt rejection detail the worker output may lack.
@@ -2952,7 +3416,7 @@ def run_variant(args) -> dict:
                                             "H3_EXPECTED_FPS": str(spec.fps),
                                             "H3_OUTPUT_WIDTH": str(spec.output_width),
                                             "H3_OUTPUT_HEIGHT": str(spec.output_height)})
-            checked = check_remote_output(output_check, variant)
+            checked = check_remote_output(output_check, variant, spec)
             record({"event": "remote_output_checked", "variant": variant, "session": session, "checked": checked})
             record({"event": "delivery_state", "variant": variant, "run_id": args.run_id, "state": "REMOTE_MP4_VALIDATED"})
             # Download the submitted workflow the worker validated, for audit.
@@ -3055,7 +3519,7 @@ def run_variant(args) -> dict:
     # failure the local MP4 is preserved and the error directs an
     # archive-only retry — never a re-run of the inference.
     try:
-        delivery = deliver_variant_to_drive_idempotent(variant, production_result["run_id"], production_result["video"])
+        delivery = deliver_variant_to_drive_idempotent(variant, production_result["run_id"], production_result["video"], spec=spec)
     except Exception as e:
         # The video is durable locally; the terminal state is
         # COMPLETED_AWAITING_ARCHIVE (archive-only retry), not FAILED.
@@ -3153,8 +3617,21 @@ def test_or_run(args):
         result = _reconcile_task(args)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return result
+    if args.action == "deliver":
+        # TASK-008: task-level supervised delivery — reuse a delivered
+        # run, recover an archive-only run, resume an in-flight run,
+        # and only behind the gates start a controlled new attempt.
+        result = deliver_task(args)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return result
     if args.action != "run":
         raise ValueError("Unknown action")
+    if getattr(args, "auto_recover", False):
+        # TASK-008: `run --auto-recover` is the deliver loop with the
+        # same args (the --run-id, when given and fresh, is attempt 1).
+        result = deliver_task(args)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return result
     result = run_variant(args)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
@@ -3163,7 +3640,7 @@ def main():
     global _COLAB_AUTH, PRODUCTION_TASK_ID, LEDGER_PATH, PRIOR_TASK_UNBILLED_RESERVE_CU
     parser = argparse.ArgumentParser()
     parser.add_argument("action", choices=["plan", "check", "run", "preflight", "archive", "status",
-                                            "resume", "stop", "reconcile"])
+                                            "resume", "stop", "reconcile", "deliver"])
     parser.add_argument("--colab-auth", choices=("oauth2", "adc"), default="adc")
     parser.add_argument("--workflow-api", default=str(ROOT / "workflow_api.json"))
     parser.add_argument("--cache-manifest", default=str(ROOT / "model_cache" / "verified_manifest.json"))
@@ -3197,6 +3674,12 @@ def main():
                              "by the spec and --production-task-id must "
                              "match the spec's task_id.")
     parser.add_argument("--run-id", default="")
+    parser.add_argument("--auto-recover", action="store_true",
+                        help="TASK-008: run as the deliver supervisor instead of a "
+                             "single attempt (same loop as the deliver action).")
+    parser.add_argument("--max-task-attempts", type=int, default=DEFAULT_MAX_TASK_ATTEMPTS,
+                        help="TASK-008: deliver / run --auto-recover: maximum GPU "
+                             "attempts for the whole task (1..3, default 2).")
     parser.add_argument("--max-rate-cu-h", type=float, default=14.0)
     parser.add_argument("--max-wall-sec", type=int, default=MAX_SESSION_SECONDS)
     parser.add_argument("--poll-interval-sec", type=int, default=60,
@@ -3257,12 +3740,21 @@ def main():
             # finally (e.g. preflight/authorization) still gets its FAILED
             # terminal state, so a later `status` does not show it as
             # healthy-but-incomplete. Best-effort; never masks the error.
-            if a.action == "run":
+            # TASK-008: a run that already reached a durable terminal
+            # state (COMPLETED_AWAITING_ARCHIVE / TASK_COMPLETED) is
+            # never rewritten to FAILED by a late exception in the
+            # archive tail — that rewrite produced a spurious ANOMALY
+            # audit alert for a run whose video was already durable.
+            # The same guard applies to `deliver`, whose run_id is the
+            # base id of the attempt that just ran.
+            if a.action in ("run", "deliver"):
                 try:
-                    from h3_run_manifest import update_run
+                    from h3_run_manifest import load_run_manifest, update_run
 
-                    update_run(ROOT, a.run_id, task_state="FAILED",
-                               last_error=f"{type(e).__name__}: {e}"[:500])
+                    current = (load_run_manifest(ROOT, a.run_id) or {}).get("task_state")
+                    if current not in ("COMPLETED_AWAITING_ARCHIVE", "TASK_COMPLETED"):
+                        update_run(ROOT, a.run_id, task_state="FAILED",
+                                   last_error=f"{type(e).__name__}: {e}"[:500])
                 except Exception:
                     pass
         print("ERROR:", str(e), file=sys.stderr)

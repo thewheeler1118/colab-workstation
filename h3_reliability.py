@@ -27,22 +27,28 @@ Definitions
   task ledger exists. The ledger is per-task, so runs inherit their
   task's verdict; runs with no readable ledger are excluded from the
   denominator and listed separately.
-- F deadline_bound_e2e_success_rate (TASK-006 P1-C): production TASKS
-  (not runs) that complete end to end within their deadline / tasks
-  authorised with a budget and a deadline whose deadline has passed
-  or whose runs are all terminal. A task counts only when EVERY
-  started run meets all seven conditions — (1) GPU allocation
+- F deadline_bound_e2e_success_rate (TASK-006 P1-C, TASK-008): production
+  TASKS (not runs) that complete end to end within their deadline /
+  tasks authorised with a budget and a deadline whose deadline has
+  passed or whose runs are all terminal. A task counts when (a) AT
+  LEAST ONE run meets all seven conditions — (1) GPU allocation
   (session_id + GPU_ALLOCATED stage), (2) model restore+load
   (MODELS_READY stage), (3) spec-conforming MP4 (VIDEO_VALIDATED
-  stage + local_sha256 + local_frames == 274), (4) MP4 independently
-  verified in persistent storage (DRIVE_VERIFIED stage +
-  delivery_state DELIVERED + drive_file_id), (5) GPU confirmed
-  stopped (GPU_STOP_CONFIRMED stage + session_state STOPPED), (6) CU
-  within the authorised budget (ledger max_observed_spent_cu <=
-  project_budget_cu), (7) final manifest + audit log complete
-  (task_state TASK_COMPLETED + TASK_COMPLETED stage) — AND the task
-  completion time (latest TASK_COMPLETED stage timestamp across its
-  runs) is at or before the deadline. Stuck/over-deadline tasks, lost
+  stage + local_sha256 + local_frames == the run's TaskSpec total
+  frames, falling back to TOTAL_FRAMES for pre-TaskSpec manifests),
+  (4) MP4 independently verified in persistent storage
+  (DRIVE_VERIFIED stage + delivery_state DELIVERED + drive_file_id),
+  (5) GPU confirmed stopped (GPU_STOP_CONFIRMED stage +
+  session_state STOPPED), (6) CU within the authorised budget (ledger
+  max_observed_spent_cu <= project_budget_cu), (7) final manifest +
+  audit log complete (task_state TASK_COMPLETED + TASK_COMPLETED
+  stage) — AND that run's TASK_COMPLETED stage timestamp is at or
+  before the deadline, (b) EVERY other run that ever allocated a
+  session_id is confirmed STOPPED with shutdown evidence (no orphan
+  billable GPU), and (c) the ledger spend is within budget. A task
+  that needed a retry still counts as a task success; Metric A
+  (first-run success) keeps distinguishing first-attempt from
+  retry success. Stuck/over-deadline tasks, lost
   artifacts, unconfirmed shutdowns, and budget violations are IN the
   denominator as failures, never silently removed. A task still
   in-flight before its deadline is excluded and listed separately;
@@ -247,6 +253,20 @@ def _stage_times(root: Path, run_id: str) -> dict[str, list[str]]:
     return out
 
 
+def _expected_frames(manifest: dict) -> int:
+    """Expected final-video frames for one run: the run's recorded
+    TaskSpec total frames (animation + tail) when present; the frozen
+    A/B total for pre-TaskSpec manifests."""
+    artifacts = manifest.get("artifacts") or {}
+    task_spec = artifacts.get("task_spec")
+    if isinstance(task_spec, dict):
+        try:
+            return int(task_spec["animation_frames"]) + int(task_spec["tail_card_frames"])
+        except (KeyError, TypeError, ValueError):
+            return TOTAL_FRAMES
+    return TOTAL_FRAMES
+
+
 def _evaluate_run_f(root: Path, manifest: dict) -> list[str]:
     """Failed F conditions (1-5, 7) for one run; empty = the run meets them."""
     failed: list[str] = []
@@ -259,7 +279,7 @@ def _evaluate_run_f(root: Path, manifest: dict) -> list[str]:
         failed.append("models: no MODELS_READY stage")
     if ("VIDEO_VALIDATED" not in stages
             or not artifacts.get("local_sha256")
-            or artifacts.get("local_frames") != TOTAL_FRAMES):
+            or artifacts.get("local_frames") != _expected_frames(manifest)):
         failed.append("inference: no VIDEO_VALIDATED stage or local MP4 "
                       "not spec-conforming (local_sha256 / local_frames)")
     if ("DRIVE_VERIFIED" not in stages
@@ -319,15 +339,48 @@ def _evaluate_task_f(root: Path, task_id: str, runs: list[dict],
     failed: list[str] = []
     if not runs:
         failed.append("no runs started before the deadline")
+    # (a) TASK-008: at least ONE run fully meets F conditions (1)-(5)
+    # and (7) and reached TASK_COMPLETED before the deadline. A task
+    # that needed a retry still counts as a task success; Metric A
+    # keeps distinguishing first-attempt from retry success.
+    successful: list[tuple[dict, str]] = []
+    for m in runs:
+        if m.get("task_state") != "TASK_COMPLETED":
+            continue
+        if _evaluate_run_f(root, m):
+            continue
+        times = _stage_times(root, m.get("run_id") or "").get("TASK_COMPLETED", [])
+        if times:
+            successful.append((m, times[0]))
+    if not successful:
+        failed.append("completion: no run fully meets F conditions "
+                      "(1)-(5),(7) with TASK_COMPLETED")
+        verdict["completed_at_utc"] = None
+    else:
+        completed_at = min(t for _, t in successful)
+        verdict["completed_at_utc"] = completed_at
+        verdict["successful_run_ids"] = sorted(
+            m.get("run_id") or "" for m, _ in successful)
+        if (_parse_utc(completed_at) or datetime.max.replace(tzinfo=timezone.utc)) > deadline:
+            failed.append(f"completion: earliest fully-successful run "
+                          f"completed at {completed_at} after deadline {deadline_raw}")
+    # (b) Every other run that ever allocated a session_id must be
+    # confirmed STOPPED with shutdown evidence — no orphan billable
+    # GPU may survive a delivered task. Runs that never allocated
+    # (no session_id) have nothing to leak.
+    successful_ids = {m.get("run_id") for m, _ in successful}
     for m in runs:
         run_id = m.get("run_id") or ""
-        if m.get("task_state") not in rm.TERMINAL_STATES:
-            # Past the deadline with a non-terminal run: stuck, a failure.
-            failed.append(f"run {run_id}: not terminal "
-                          f"(task_state={m.get('task_state')})")
+        if run_id in successful_ids:
             continue
-        for cond in _evaluate_run_f(root, m):
-            failed.append(f"run {run_id}: {cond}")
+        if not m.get("session_id"):
+            continue
+        stages = _stage_times(root, run_id)
+        if m.get("session_state") != "STOPPED" or "GPU_STOP_CONFIRMED" not in stages:
+            failed.append(f"shutdown: run {run_id} allocated a session "
+                          f"but is not confirmed STOPPED "
+                          f"(session_state={m.get('session_state')}, "
+                          f"GPU_STOP_CONFIRMED={'GPU_STOP_CONFIRMED' in stages})")
     try:
         spent = float(ledger.get("max_observed_spent_cu"))
         budget = float(ledger.get("project_budget_cu", PROJECT_BUDGET_CU))
@@ -336,18 +389,6 @@ def _evaluate_task_f(root: Path, task_id: str, runs: list[dict],
                           f"project_budget_cu {budget}")
     except (TypeError, ValueError):
         failed.append("budget: ledger spend unreadable")
-    completed_at = None
-    for m in runs:
-        times = _stage_times(root, m.get("run_id") or "").get("TASK_COMPLETED", [])
-        if times:
-            completed_at = times[-1] if completed_at is None \
-                else max(completed_at, times[-1])
-    verdict["completed_at_utc"] = completed_at
-    if completed_at is None:
-        failed.append("completion: no TASK_COMPLETED stage recorded")
-    elif (_parse_utc(completed_at) or datetime.max.replace(tzinfo=timezone.utc)) > deadline:
-        failed.append(f"completion: completed at {completed_at} after "
-                      f"deadline {deadline_raw}")
     verdict["failed_conditions"] = failed
     verdict["verdict"] = "success" if not failed else "failure"
     return verdict

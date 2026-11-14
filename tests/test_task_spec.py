@@ -162,12 +162,29 @@ class SpecValidationTest(unittest.TestCase):
 
 
 class VariantAdapterTest(unittest.TestCase):
-    def test_example_spec_matches_a_fixture(self):
-        """config/task_spec.example.json is the A fixture, written as
-        a plain task-spec file: same task id, prefix, poster, seed 42
-        and 48 tail frames. Only the origin differs (task-spec vs
-        the in-code variant adapter)."""
+    def test_example_spec_is_generic_default(self):
+        """config/task_spec.example.json is the generic default (TASK-008):
+        the A-fixture task id / prefix / poster / seed, but tail 0 —
+        a 226-frame pure generated video, decoupled from the historical
+        274-frame A/B shape. The 48-frame tail lives in the with_tail
+        example instead."""
         loaded = load_task_spec(ROOT / "config" / "task_spec.example.json")
+        adapter = task_spec_for_variant("A", "h3-ab-20261111",
+                                        "assets/original_poster.jpg")
+        self.assertEqual(loaded.task_id, adapter.task_id)
+        self.assertEqual(loaded.output_prefix, adapter.output_prefix)
+        self.assertEqual(loaded.ref_image_1.sha256, adapter.ref_image_1.sha256)
+        self.assertEqual(loaded.seed, adapter.seed)
+        self.assertEqual(loaded.tail_card_frames, 0)
+        self.assertEqual(loaded.total_frames, 226)
+        self.assertEqual(loaded.origin, "task-spec")
+
+    def test_with_tail_example_matches_a_fixture(self):
+        """config/task_spec.with_tail.example.json is the A fixture,
+        written as a plain task-spec file: same task id, prefix, poster,
+        seed 42 and 48 tail frames (274 total). Only the origin differs
+        (task-spec vs the in-code variant adapter)."""
+        loaded = load_task_spec(ROOT / "config" / "task_spec.with_tail.example.json")
         adapter = task_spec_for_variant("A", "h3-ab-20261111",
                                         "assets/original_poster.jpg")
         self.assertEqual(loaded.to_dict(), adapter.to_dict())

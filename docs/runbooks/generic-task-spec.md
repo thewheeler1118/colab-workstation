@@ -11,8 +11,11 @@ change with its own PR, not a drive-by edit.
 
 ## The spec file
 
-`config/task_spec.example.json` is the canonical example (it is the old
-A fixture, written as a plain task-spec file). A spec has:
+`config/task_spec.example.json` is the canonical example: a generic
+226-frame task with `tail_card_frames: 0` (no poster tail). The old A
+fixture form — 48-frame tail, 274 frames total — lives in
+`config/task_spec.with_tail.example.json`, which is byte-equal to the
+A adapter's spec. A spec has:
 
 | Field | Required | Meaning |
 |---|---|---|
@@ -73,9 +76,27 @@ spec's `task_id`. For `preflight` / `plan` it may be omitted (the spec's
 `--variant A|B` still works, but only as a built-in test-fixture
 adapter: it maps to the equivalent TaskSpec (A: seed 42, B: seed 43,
 tail 48, the pinned poster + prompt). All regression tests keep
-passing through it, and `config/task_spec.example.json` is byte-equal
-to the A adapter's spec. New tasks, new docs and the standard
+passing through it, and `config/task_spec.with_tail.example.json` is
+byte-equal to the A adapter's spec. New tasks, new docs and the standard
 production entry always use `--task-spec`. Do not add a third variant.
+
+## Spec-driven acceptance (TASK-008)
+
+Every acceptance gate reads the spec — there is no 274 / 1080x1920
+hardcode left in the chain: remote output check, local download
+validation, delivery pre-check and metric F all compare against
+`spec.total_frames`, `spec.fps`, `spec.output_width`,
+`spec.output_height`. A 226-frame no-tail task and a 720x1280 task
+pass the same gates the A fixture does. The only 274 fallback is the
+spec-less legacy path (old manifests, `--variant` fixture).
+
+The worker also debounces its ComfyUI polling: a single `/history`
+query may time out (30 s now, was 10 s); transient failures
+(timeout, 502/503/504, connection errors) are retried with backoff
+up to 8 consecutive times while the ComfyUI process is alive, and a
+`/prompt` submit that times out is first checked against `/queue`
+and `/history` for the same `client_id` before any resubmit — never
+a blind second submit, never a killed inference.
 
 ## What preflight proves at 0 CU (Task 3)
 

@@ -107,6 +107,12 @@
     },
     {
       "path": "config/task_spec.example.json",
+      "size_bytes": 1908,
+      "sha256": "ccfd34a767b381321473dba5d9403f083e1644556ba09a3652aed971cd1e2a7c",
+      "role": "Configuration (mirrors code constants; asserted by tests)"
+    },
+    {
+      "path": "config/task_spec.with_tail.example.json",
       "size_bytes": 1910,
       "sha256": "fd173f0625c4694cab57e3cf6770297ce9c0b41f9ff720324a50b3c3d91df1bc",
       "role": "Configuration (mirrors code constants; asserted by tests)"
@@ -419,8 +425,8 @@
     },
     {
       "path": "docs/module_inventory.md",
-      "size_bytes": 51006,
-      "sha256": "548d35917d6ab2db772c38f59213aeaf3fee769f10b6f64fce773b44d9a44153",
+      "size_bytes": 53553,
+      "sha256": "62234551dfd44d9ebbcaa295c27465d63b344ffb2fdb892aa77df100ba41407d",
       "role": "Module inventory (this table's source of truth for hashes)"
     },
     {
@@ -461,8 +467,8 @@
     },
     {
       "path": "docs/runbooks/generic-task-spec.md",
-      "size_bytes": 5632,
-      "sha256": "f23ad6b18dedc7041b5bf348889d245c02f911fc577ff94e10bdcf9e19c7faef",
+      "size_bytes": 6745,
+      "sha256": "5d132ec965f96037bb29abbb8188794fe296f0cfc42d3a8e1484786253fb6ed6",
       "role": "Documentation / evidence"
     },
     {
@@ -485,8 +491,8 @@
     },
     {
       "path": "docs/runbooks/production-run.md",
-      "size_bytes": 2535,
-      "sha256": "2a195353fbe9baca4c298edf62395914358fec3aa9d180b513cc75fe287f9186",
+      "size_bytes": 3875,
+      "sha256": "8a24e18ab56e91cdb88466f7c171c846c8e509297f11f55e566b7efcd793aaee",
       "role": "Documentation / evidence"
     },
     {
@@ -593,8 +599,8 @@
     },
     {
       "path": "h3_controller.py",
-      "size_bytes": 170499,
-      "sha256": "7ff20be9ee20126bbf8d75d9bca9f254d255b57446c9ac5d8ff57a7b98412278",
+      "size_bytes": 197004,
+      "sha256": "4910ffeeaf05da79623bad106ba5ecabca7203002b7726b536bb572d3590232e",
       "role": "Run orchestration: preflight, allocation, mount, worker exec, download, stop"
     },
     {
@@ -695,14 +701,14 @@
     },
     {
       "path": "h3_reliability.py",
-      "size_bytes": 24883,
-      "sha256": "7166397fc5e839010461105817259e2e94f80c423133c411a013fa5b1d39f8d6",
+      "size_bytes": 26961,
+      "sha256": "089dfd19e8b4fb8b053e314e8c1d296f02d57046084cc4bd78590b2f61f7526b",
       "role": "Supporting file"
     },
     {
       "path": "h3_remote_worker.py",
-      "size_bytes": 59666,
-      "sha256": "d32a1dd9c756f29166544624e1094b1f829231e7c27656de8ca5abe66f05613e",
+      "size_bytes": 65469,
+      "sha256": "5ddd6ce05dce681fe750d337bf30672a377557bfc8090d0b6308272d7fe7903f",
       "role": "Remote ComfyUI worker: restore, inference, find_rendered_video, assemble"
     },
     {
@@ -905,8 +911,8 @@
     },
     {
       "path": "scripts/run_h3_task.sh",
-      "size_bytes": 5324,
-      "sha256": "88d0e5b5e280ec037232f216b51920a8d458b1be5c9ac1050ca7684c9515b2f7",
+      "size_bytes": 7325,
+      "sha256": "586e28b39af472526efa5605a075e72c9c17e2c61ef99684c402926cf2e315ee",
       "role": "Operator wrapper / offline check"
     },
     {
@@ -988,6 +994,12 @@
       "role": "Tests: video contract, prompts, workflow patch, poster hash (asset-gated)"
     },
     {
+      "path": "tests/test_deliver.py",
+      "size_bytes": 18662,
+      "sha256": "4fc7ead40ccf41c6f468e6bd8b357c9961d99c639242cd1ca24859781284d68a",
+      "role": "Tests"
+    },
+    {
       "path": "tests/test_direct_download.py",
       "size_bytes": 10092,
       "sha256": "979b7c601ba9a78db4fc8e0f9e5774a4f932d39963ca9fd2d32c18172fcb19e0",
@@ -995,8 +1007,8 @@
     },
     {
       "path": "tests/test_drive_delivery.py",
-      "size_bytes": 28036,
-      "sha256": "e8103e3a291ccf0ec90f1c2c9bb677e3992b9026fab4070dc08f288b22be85aa",
+      "size_bytes": 28557,
+      "sha256": "1405c9d092a70d21a5313a7187924fad459ab124eac0bf770c68e406e3239f86",
       "role": "Tests"
     },
     {
@@ -1085,8 +1097,8 @@
     },
     {
       "path": "tests/test_reliability.py",
-      "size_bytes": 13583,
-      "sha256": "86ab5111e2b1f54f18903f318e0950c02e1e6d4226fa8f5d69690bf8fc665998",
+      "size_bytes": 17988,
+      "sha256": "8e20f1e82a143fc77513888d9ac76fa171c25be6fe67b2bbb5bb94e3568629c9",
       "role": "Tests"
     },
     {
@@ -1097,8 +1109,8 @@
     },
     {
       "path": "tests/test_run_h3_task_script.py",
-      "size_bytes": 4555,
-      "sha256": "76390b1d3eb7cab9829b5e626004d99da56d89f5c333c66c9a50a8ab830ea9e8",
+      "size_bytes": 6941,
+      "sha256": "3f0a86b40b3e3a7fb07d2558928c9318182cacaae82ed9b24a5a9514c90ddb85",
       "role": "Tests"
     },
     {
@@ -1138,6 +1150,18 @@
       "role": "Tests"
     },
     {
+      "path": "tests/test_task008_chain.py",
+      "size_bytes": 9180,
+      "sha256": "5cf51bc9140e4acac3f9499f83599d3ebbf76c6dafa403fa6a819a526e756b71",
+      "role": "Tests"
+    },
+    {
+      "path": "tests/test_task008_purge.py",
+      "size_bytes": 11008,
+      "sha256": "99efa1f08df4af543e2823e8ef929e1c7645697fdb2fda4a2d0e73fe01bba06d",
+      "role": "Tests"
+    },
+    {
       "path": "tests/test_task_budget.py",
       "size_bytes": 11573,
       "sha256": "a930790799647081fb1c760b9e9f38a70af58bce98e2a2888622f15786c51c07",
@@ -1151,8 +1175,8 @@
     },
     {
       "path": "tests/test_task_spec.py",
-      "size_bytes": 29718,
-      "sha256": "5d133bdfe500a2c89b8a218f428d051bca6dc10f3a9238d3fc5ee0b1aa69e9c4",
+      "size_bytes": 30751,
+      "sha256": "d1472a2cbd60c75b4013c4113c7efae2824a18464a5918a62f0edbc080a5619c",
       "role": "Tests"
     },
     {
@@ -1165,6 +1189,12 @@
       "path": "tests/test_watchdog_shutdown.py",
       "size_bytes": 10639,
       "sha256": "927e70a47b498bdd380bc84b412467149b4063481637c370548e98465a7e060a",
+      "role": "Tests"
+    },
+    {
+      "path": "tests/test_worker_poll_debounce.py",
+      "size_bytes": 8461,
+      "sha256": "1a11d6be3268b7a0c93265b3904cb0ebec3b02eca1dca48e90652e7a9277b746",
       "role": "Tests"
     },
     {
