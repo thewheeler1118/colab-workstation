@@ -66,6 +66,14 @@ same TaskLock and 30 CU envelope, in order:
    403, ACCOUNT_MISMATCH, budget exhausted) fail closed immediately —
    never retried.
 
+An idle machine (no active sessions, live rate 0) is normal: the new
+attempt's wall time is estimated at the conservative `--max-rate-cu-h`
+ceiling (default 14.0 CU/h), never refused as unreadable. The
+caller's `--run-id` is attempt 1 only — a second attempt always
+derives a fresh run_id. A failed delivery exits non-zero (the
+`deliver` / `run --auto-recover` command prints the JSON verdict
+first, then exits 1), so a script must not treat exit 0 as success.
+
 ## If the VM restarts mid-run
 
 See vm-restart-orphan-recovery.md FIRST: check/download the orphan session

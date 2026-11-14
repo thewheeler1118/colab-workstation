@@ -1,10 +1,15 @@
-"""TASK-008 (Issue #57): task-level automatic recovery loop (`deliver`).
+"""TASK-008 (Issue #57) / TASK-008.1: task-level automatic recovery loop (`deliver`).
 
 The loop reuses a delivered run, recovers an archive-only run,
 resumes an in-flight run, and only behind the session / budget /
 deadline gates starts a controlled new attempt. No GPU, no CU, no
 Drive — the live layer (inspect, run_variant, resume, Drive verify)
 is stubbed; manifests and the ledger are real files on a temp ROOT.
+
+TASK-008.1: the idle machine (rate 0.0, no sessions) is the normal
+state — the wall is estimated at the 14.0 CU/h ceiling; the caller's
+--run-id is attempt 1 only, later attempts derive fresh ids; a failed
+delivery exits non-zero from test_or_run.
 """
 import argparse
 import hashlib
@@ -105,9 +110,12 @@ class DeliverTest(unittest.TestCase):
         ]
         for p in self._patches:
             p.start()
+        # TASK-008.1: the default mock is the real idle machine — no
+        # active sessions, rate 0.0 — not a busy 12.0 CU/h. The positive
+        # rate branch is covered by test_live_positive_rate_still_used.
         self.inspect = mock.patch.object(
             hc, "inspect",
-            return_value={"cu_balance": 144.19, "rate": 12.0,
+            return_value={"cu_balance": 144.19, "rate": 0.0,
                           "sessions": []}).start()
         self.run_variant = mock.patch.object(hc, "_run_variant_inner").start()
         self.resume_run = mock.patch.object(hc, "_resume_run_inner").start()
@@ -195,6 +203,77 @@ class DeliverTest(unittest.TestCase):
         self.assertEqual(self.run_variant.call_count, 1)
         called_run_id = self.run_variant.call_args[0][0].run_id
         self.assertTrue(called_run_id.startswith("h3-"))
+
+    def test_idle_rate_zero_uses_conservative_ceiling(self):
+        # TASK-008.1: the real idle machine reports rate 0.0 with no
+        # sessions. That must NOT be live_unreadable: the wall is
+        # estimated at the 14.0 CU/h ceiling (2707 s here), and the
+        # attempt proceeds.
+        _manifest(self.root, "run-1", "FAILED")
+        _ledger(self.root)
+        self.run_variant.return_value = {
+            "delivery": {"drive_file_id": "drive-file-2"}}
+        result = hc.deliver_task(self._args())
+        self.assertTrue(result["delivered"])
+        self.assertEqual(result["outcome"], "new_attempt_succeeded")
+        step = [s for s in result["steps"]
+                if s["step"] == "new_attempt"][0]
+        self.assertIn("wall 2707s at 14.0 CU/h", step["detail"])
+
+    def test_live_positive_rate_still_used(self):
+        # The busy-machine branch: a real positive rate is used as-is
+        # (3159 s at 12.0 CU/h), not replaced by the ceiling.
+        _manifest(self.root, "run-1", "FAILED")
+        _ledger(self.root)
+        self.inspect.return_value = {"cu_balance": 144.19, "rate": 12.0,
+                                     "sessions": []}
+        self.run_variant.return_value = {
+            "delivery": {"drive_file_id": "drive-file-2"}}
+        result = hc.deliver_task(self._args())
+        self.assertTrue(result["delivered"])
+        step = [s for s in result["steps"]
+                if s["step"] == "new_attempt"][0]
+        self.assertIn("wall 3159s at 12.0 CU/h", step["detail"])
+
+    def test_two_attempts_with_initial_run_id_derives_fresh_second_id(self):
+        # TASK-008.1: the caller's --run-id is attempt 1 only. Once the
+        # first attempt created its manifest and failed transiently, the
+        # second attempt must derive a fresh id instead of colliding
+        # with the first manifest (the pre-fix code refused the second
+        # attempt as a "duplicate run").
+        initial = "h3-20261114T000000Z-abcdef"
+        _ledger(self.root)
+        calls = []
+
+        def _attempt(attempt_args):
+            calls.append(attempt_args.run_id)
+            if len(calls) == 1:
+                _manifest(self.root, attempt_args.run_id, "FAILED")
+                raise RuntimeError("transient boom")
+            return {"delivery": {"drive_file_id": "drive-file-2"}}
+
+        self.run_variant.side_effect = _attempt
+        result = hc.deliver_task(self._args(run_id=initial))
+        self.assertTrue(result["delivered"])
+        self.assertEqual(result["outcome"], "new_attempt_succeeded")
+        self.assertEqual(result["attempts_used"], 2)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], initial)
+        self.assertNotEqual(calls[1], initial)
+        self.assertTrue(calls[1].startswith("h3-"))
+
+    def test_initial_run_id_already_existing_refuses(self):
+        # If the --run-id already exists before the first attempt
+        # starts, deliver still refuses the duplicate (the earlier
+        # reuse / archive / resume steps own an existing manifest).
+        initial = "h3-20261114T000000Z-abcdef"
+        _manifest(self.root, initial, "FAILED")
+        _ledger(self.root)
+        result = hc.deliver_task(self._args(run_id=initial))
+        self.assertFalse(result["delivered"])
+        self.assertEqual(result["outcome"], "deterministic_error")
+        self.assertIn("already exists", result["reason"])
+        self.run_variant.assert_not_called()
 
     def test_unknown_session_refuses_new_gpu(self):
         _manifest(self.root, "run-1", "FAILED")
@@ -384,6 +463,26 @@ class DeliverDispatchTest(unittest.TestCase):
             result = hc.test_or_run(args)
         d.assert_called_once_with(args)
         self.assertEqual(result, {"delivered": True})
+
+    def test_deliver_failure_exits_nonzero(self):
+        # TASK-008.1: a failed delivery must not exit 0.
+        args = argparse.Namespace(action="deliver", production_task_id=TASK)
+        with mock.patch.object(hc, "deliver_task",
+                               return_value={"delivered": False,
+                                             "outcome": "budget_insufficient"}):
+            with self.assertRaises(SystemExit) as ctx:
+                hc.test_or_run(args)
+        self.assertEqual(ctx.exception.code, 1)
+
+    def test_auto_recover_failure_exits_nonzero(self):
+        args = argparse.Namespace(action="run", production_task_id=TASK,
+                                  auto_recover=True)
+        with mock.patch.object(hc, "deliver_task",
+                               return_value={"delivered": False,
+                                             "outcome": "attempts_exhausted"}):
+            with self.assertRaises(SystemExit) as ctx:
+                hc.test_or_run(args)
+        self.assertEqual(ctx.exception.code, 1)
 
     def test_run_without_auto_recover_calls_run_variant(self):
         args = argparse.Namespace(action="run", production_task_id=TASK,

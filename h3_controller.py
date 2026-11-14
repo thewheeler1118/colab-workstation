@@ -2887,6 +2887,11 @@ def deliver_task(args) -> dict:
     deadline = parse_task_deadline(getattr(args, "task_deadline_utc", "") or "")
     steps: list[dict] = []
     guard = 0
+    # TASK-008.1: the caller's --run-id is attempt 1 only. Once a new
+    # attempt has been started in this deliver call, later attempts must
+    # derive a fresh run_id — reusing the first id would collide with
+    # the manifest the first attempt already created.
+    initial_run_id_used = False
     while True:
         guard += 1
         if guard > max_attempts + 10:
@@ -2983,17 +2988,27 @@ def deliver_task(args) -> dict:
                                    latest.get("run_id") if latest else None, None,
                                    attempts_used, max_attempts, steps,
                                    f"live usage/sessions unreadable; cannot bound a new attempt: {e}")
-        if live.get("rate") is None or float(live.get("rate") or 0) <= 0 \
-                or live.get("cu_balance") is None:
+        if live.get("cu_balance") is None:
             return _deliver_result(False, "live_unreadable", task_id,
                                    latest.get("run_id") if latest else None, None,
                                    attempts_used, max_attempts, steps,
-                                   "live CU rate/balance unreadable; cannot bound a new attempt")
+                                   "live CU balance unreadable; cannot bound a new attempt")
+        # TASK-008.1: an idle machine reports rate 0 (or None) with no
+        # active sessions — that is the normal idle state, not unreadable
+        # data (production preflight observes exactly this: 0 sessions,
+        # rate 0). Estimate the wall time at the conservative rate
+        # ceiling --max-rate-cu-h (default 14.0 CU/h, the same worst-case
+        # rate the pre-registration deadline uses), so the gate stays
+        # conservative while the true burn rate is unknown. A positive
+        # live rate is used as-is.
+        rate = live.get("rate")
+        if rate is None or float(rate or 0) <= 0:
+            rate = float(getattr(args, "max_rate_cu_h", 14.0))
         ledger = _read_task_ledger(task_id)
         if ledger is None:
             ledger = _provisional_ledger(live["cu_balance"])
         try:
-            wall = allowed_runtime_seconds(live["rate"], live["cu_balance"], ledger)
+            wall = allowed_runtime_seconds(rate, live["cu_balance"], ledger)
         except Exception as e:  # noqa: BLE001 - BLOCKED / insufficient CU
             return _deliver_result(False, "budget_insufficient", task_id,
                                    latest.get("run_id") if latest else None, None,
@@ -3024,18 +3039,27 @@ def deliver_task(args) -> dict:
                                    latest.get("run_id") if latest else None, None,
                                    attempts_used, max_attempts, steps,
                                    f"cannot resolve a TaskSpec for a new attempt: {e}")
-        run_id = getattr(args, "run_id", "") or ""
-        if run_id:
+        initial_run_id = getattr(args, "run_id", "") or ""
+        if initial_run_id and not initial_run_id_used:
+            # First new attempt of this deliver call: the caller's
+            # --run-id is used. If it already exists before the first
+            # attempt starts, refuse — the earlier reuse / archive /
+            # resume steps own an existing manifest, and silently
+            # reusing the id would collide with it.
+            run_id = initial_run_id
             from h3_run_manifest import manifest_exists
 
             if manifest_exists(ROOT, run_id):
                 return _deliver_result(False, "deterministic_error", task_id, run_id, None,
                                        attempts_used, max_attempts, steps,
                                        f"--run-id {run_id} already exists; refusing a duplicate run")
+            initial_run_id_used = True
         else:
+            # Second and later attempts always derive a fresh id.
             run_id = _fresh_run_id()
         steps.append({"step": "new_attempt", "run_id": run_id,
-                      "detail": f"attempt {attempts_used + 1}/{max_attempts}, wall {wall}s"})
+                      "detail": f"attempt {attempts_used + 1}/{max_attempts}, wall {wall}s "
+                                f"at {rate} CU/h"})
         try:
             result = _run_variant_inner(_deliver_attempt_args(args, run_id))
         except Exception as e:  # noqa: BLE001 - deterministic vs transient split
@@ -3621,16 +3645,26 @@ def test_or_run(args):
         # TASK-008: task-level supervised delivery — reuse a delivered
         # run, recover an archive-only run, resume an in-flight run,
         # and only behind the gates start a controlled new attempt.
+        # TASK-008.1: a failed delivery must not exit 0 — the caller
+        # (script / operator) must see the failure. SystemExit is not
+        # caught by main()'s `except Exception`, so no manifest is
+        # rewritten on this path.
         result = deliver_task(args)
         print(json.dumps(result, ensure_ascii=False, indent=2))
+        if not result.get("delivered"):
+            sys.exit(1)
         return result
     if args.action != "run":
         raise ValueError("Unknown action")
     if getattr(args, "auto_recover", False):
         # TASK-008: `run --auto-recover` is the deliver loop with the
         # same args (the --run-id, when given and fresh, is attempt 1).
+        # TASK-008.1: same non-zero exit on a failed delivery as the
+        # deliver action above.
         result = deliver_task(args)
         print(json.dumps(result, ensure_ascii=False, indent=2))
+        if not result.get("delivered"):
+            sys.exit(1)
         return result
     result = run_variant(args)
     print(json.dumps(result, ensure_ascii=False, indent=2))
