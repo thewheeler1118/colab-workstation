@@ -425,8 +425,8 @@
     },
     {
       "path": "docs/module_inventory.md",
-      "size_bytes": 53553,
-      "sha256": "62234551dfd44d9ebbcaa295c27465d63b344ffb2fdb892aa77df100ba41407d",
+      "size_bytes": 53901,
+      "sha256": "eb4c48c65e314f051888dacd32e0509d9ef6fa41932108b7961c0cb89515300f",
       "role": "Module inventory (this table's source of truth for hashes)"
     },
     {
@@ -491,8 +491,8 @@
     },
     {
       "path": "docs/runbooks/production-run.md",
-      "size_bytes": 3875,
-      "sha256": "8a24e18ab56e91cdb88466f7c171c846c8e509297f11f55e566b7efcd793aaee",
+      "size_bytes": 4339,
+      "sha256": "23b0782a20e21402167740c1ac1ce1df6f7800152230ed6f5a8f3ffb88edff08",
       "role": "Documentation / evidence"
     },
     {
@@ -599,8 +599,8 @@
     },
     {
       "path": "h3_controller.py",
-      "size_bytes": 197004,
-      "sha256": "4910ffeeaf05da79623bad106ba5ecabca7203002b7726b536bb572d3590232e",
+      "size_bytes": 198923,
+      "sha256": "6977fc294983cf8af55de4f59317a47bda46a075954d81564cee9faca0581ae4",
       "role": "Run orchestration: preflight, allocation, mount, worker exec, download, stop"
     },
     {
@@ -995,8 +995,8 @@
     },
     {
       "path": "tests/test_deliver.py",
-      "size_bytes": 18662,
-      "sha256": "4fc7ead40ccf41c6f468e6bd8b357c9961d99c639242cd1ca24859781284d68a",
+      "size_bytes": 23627,
+      "sha256": "1488a5d1ed2fe60fc7e62d52d66ae6c075636f2550065f9a47dce918e3d4d123",
       "role": "Tests"
     },
     {
